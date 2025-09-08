@@ -1,0 +1,14 @@
+[project]
+name = "zrasr"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "ffmpeg>=1.4",
+    "flow-matching>=1.0.10",
+    "soundfile>=0.13.1",
+    "sox>=1.5.0",
+    "transformers>=4.56.0",
+    "wandb>=0.21.3",
+]
