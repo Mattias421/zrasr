@@ -74,7 +74,7 @@ num_paths_train: 2
 num_paths_test: 16
 use_frozen_feats: false
 step_size: 0.05
-num_exact_log_p: 5
+num_exact_log_p: 1
 
 # Training parameters
 number_of_epochs_seed: 5
@@ -115,6 +115,8 @@ use_embeddings: false
 
 # Outputs
 output_neurons: 30  # BPE size, index(blank/eos/bos) = 0
+char_prior: !new:char_counter.CharPrior
+    n_chars: !ref <output_neurons>
 
 #
 # Functions and classes
@@ -222,6 +224,7 @@ modules:
     enc: !ref <enc>
     ctc_lin: !ref <ctc_lin>
     cfm_model: !ref <cfm_model>
+    char_prior: !ref <char_prior>
 
 model: !new:torch.nn.ModuleList
    - [!ref <enc>, !ref <ctc_lin>]
@@ -259,6 +262,7 @@ checkpointer: !new:speechbrain.utils.checkpoints.Checkpointer
       scheduler_wav2vec: !ref <lr_annealing_wav2vec>
       counter: !ref <epoch_counter>
       couter_seed: !ref <epoch_counter_seed>
+      char_prior: !ref <char_prior>
 
 error_rate_computer: !name:speechbrain.utils.metric_stats.ErrorRateStats
 

@@ -42,84 +42,6 @@ from flow_matching.solver import Solver, ODESolver
 logger = get_logger(__name__)
 
 
-def get_lattice(
-    log_probs_nnet_output: torch.Tensor,
-    input_lens: torch.Tensor,
-    decoder: k2.Fsa,
-    search_beam: int = 5,
-    output_beam: int = 5,
-    min_active_states: int = 300,
-    max_active_states: int = 1000,
-    ac_scale: float = 1.0,
-    subsampling_factor: int = 1,
-) -> k2.Fsa:
-    """
-    Get the decoding lattice from a decoding graph and neural network output.
-
-    Arguments
-    ---------
-    log_probs_nnet_output: torch.Tensor
-        It is the output of a neural model of shape `(batch, seq_len, num_tokens)`.
-    input_lens: torch.Tensor
-        It is an int tensor of shape (batch,). It contains lengths of
-        each sequence in `log_probs_nnet_output`.
-    decoder: k2.Fsa
-        It is an instance of :class:`k2.Fsa` that represents the decoding graph.
-    search_beam: int
-        Decoding beam, e.g. 20.  Ger is faster, larger is more exact
-        (less pruning). This is the default value; it may be modified by
-        `min_active_states` and `max_active_states`.
-    output_beam: int
-         Beam to prune output, similar to lattice-beam in Kaldi.  Relative
-         to best path of output.
-    min_active_states: int
-        Minimum number of FSA states that are allowed to be active on any given
-        frame for any given intersection/composition task. This is advisory,
-        in that it will try not to have fewer than this number active.
-        Set it to zero if there is no constraint.
-    max_active_states: int
-        Maximum number of FSA states that are allowed to be active on any given
-        frame for any given intersection/composition task. This is advisory,
-        in that it will try not to exceed that but may not always succeed.
-        You can use a very large number if no constraint is needed.
-    ac_scale: float
-        acoustic scale applied to `log_probs_nnet_output`
-    subsampling_factor: int
-        The subsampling factor of the model.
-
-    Returns
-    -------
-    lattice: k2.Fsa
-        An FsaVec containing the decoding result. It has axes [utt][state][arc].
-    """
-
-    device = log_probs_nnet_output.device
-    input_lens = input_lens.to(device)
-    if decoder.device != device:
-        logger.warn(
-            "Decoding graph (HL or HLG) not loaded on the same device"
-            "  as nnet, this will cause decoding speed degradation"
-        )
-        decoder = decoder.to(device)
-
-    input_lens = (input_lens * log_probs_nnet_output.shape[1]).round().int()
-    # NOTE: low ac_scales may results in very big lattices and OOM errors.
-    log_probs_nnet_output = log_probs_nnet_output * ac_scale
-
-    lattice = k2.get_lattice(
-        log_probs_nnet_output,
-        input_lens,
-        decoder,
-        search_beam=search_beam,
-        output_beam=output_beam,
-        min_active_states=min_active_states,
-        max_active_states=max_active_states,
-        subsampling_factor=subsampling_factor,
-    )
-
-    return lattice
-
-
 # Define training procedure
 class ASR(sb.Brain):
     def get_feats_and_p_ctc(self, wavs, wav_lens):
@@ -197,6 +119,12 @@ class ASR(sb.Brain):
                 torch.save(lattice.as_dict(), lat_path)
             else:
                 lattice = k2.fsa.Fsa.from_dict(torch.load(lat_path))
+                # text = sbk2.lattice_decoder.one_best_decoding(lattice)
+                # breakpoint()
+                # text = sbk2.utils.lattice_paths_to_text(text, self.lexicon.word_table)
+                # print(lat_id)
+                # print(text)
+
 
             if self.seeding:
                 nbest = k2.nbest.Nbest.from_lattice(lattice, num_paths=self.hparams.num_paths_test, nbest_scale=self.hparams.nbest_scale)
@@ -238,6 +166,9 @@ class ASR(sb.Brain):
             hyp_row_ids = torch.concatenate(hyp_row_ids)
             x_1 = torch.concatenate(char_feats)
             x_0 = torch.randn_like(x_1).to(self.device)
+
+            if stage == sb.Stage.TRAIN:
+                self.modules.char_prior.update_counts(char_labels)
 
             # sample time (user's responsibility)
             t = torch.rand(x_1.shape[0]).to(self.device) 
@@ -290,6 +221,9 @@ class ASR(sb.Brain):
                 log_p_estimate += exact_log_p
             log_p_estimate /= self.hparams.num_exact_log_p
 
+            log_p_char = self.modules.char_prior(char_labels)
+
+            log_p_estimate += log_p_char
             cfm_total_scores = torch.zeros(nbest.fsa.shape[0], device=self.device).scatter_add_(0, hyp_row_ids, log_p_estimate)
             best_cfm_path_index = cfm_total_scores.argsort(descending=True)[0]
             cfm_path = nbest.fsa[best_cfm_path_index]
@@ -338,8 +272,7 @@ class ASR(sb.Brain):
                 predicted_texts = sbk2.utils.lattice_paths_to_text(
                     path, self.lexicon.word_table
                 )
-                print(k)
-                print(predicted_texts)
+                
 
                 predicted_words = [wrd.split(" ") for wrd in predicted_texts]
                 target_words = [wrd.split(" ") for wrd in batch.wrd]
@@ -591,6 +524,7 @@ if __name__ == "__main__":
         hyperparams_to_save=hparams_file,
         overrides=overrides,
     )
+
 
     # Dataset prep (parsing Librispeech)
     import librispeech_prepare
