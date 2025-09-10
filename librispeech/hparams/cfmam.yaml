@@ -205,14 +205,25 @@ ctc_cost: !name:speechbrain.k2_integration.losses.ctc_k2
    reduction: mean
    beam_size: 10
 
-cfm_model: !new:cfm_model.MLP
-    input_dim: 1024
-    time_dim: 1
-    class_dim: 1
-    hidden_dim: 1024
-    num_class: 30
-    quantise_time: 100
-    use_embeddings: !ref <use_embeddings>
+cfm_model: !new:models.unet.UNetModel
+    in_channels: 1
+    model_channels: 16
+    out_channels: 1
+    num_classes: !ref <output_neurons>
+    num_res_blocks: 2
+    attention_resolutions: [2]
+    dropout: 0.3
+    channel_mult: [2]
+    conv_resample: false
+    dims: 2
+    num_heads: 1
+    num_head_channels: -1
+    num_heads_upsample: -1
+    use_scale_shift_norm: true
+    resblock_updown: false
+    use_new_attention_order: true
+    with_fourier_features: false
+
 
 scheduler: !new:flow_matching.path.scheduler.CondOTScheduler
 path: !new:flow_matching.path.AffineProbPath

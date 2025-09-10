@@ -165,6 +165,13 @@ class ASR(sb.Brain):
             char_labels = torch.concatenate(char_labels)
             hyp_row_ids = torch.concatenate(hyp_row_ids)
             x_1 = torch.concatenate(char_feats)
+
+            if stage == sb.Stage.TRAIN:
+                indices = torch.randperm(char_labels.shape[0])[:128]
+                char_labels = char_labels[indices]
+                x_1 = x_1[indices]
+
+            x_1 = x_1.reshape(x_1.shape[0], 1, 32, 32)
             x_0 = torch.randn_like(x_1).to(self.device)
 
             if stage == sb.Stage.TRAIN:
@@ -177,7 +184,7 @@ class ASR(sb.Brain):
             path_sample = self.hparams.path.sample(t=t, x_0=x_0, x_1=x_1)
 
             # flow matching l2 loss
-            cfm_loss = torch.pow(self.modules.cfm_model(path_sample.x_t,path_sample.t, char_labels) - path_sample.dx_t, 2).mean()
+            cfm_loss = torch.pow(self.modules.cfm_model(path_sample.x_t,path_sample.t, {'label':char_labels}) - path_sample.dx_t, 2).mean()
 
         if (stage == sb.Stage.TEST or stage == sb.Stage.VALID) and not self.seeding:
             # get seed and lattice error rate
@@ -208,18 +215,18 @@ class ASR(sb.Brain):
             # get cfm model likelihoods
             class WrappedModel(ModelWrapper):
                 def forward(self, x: torch.Tensor, t: torch.Tensor):
-                    return self.model(x, t, char_labels)
+                    return self.model(x, t.repeat(x.shape[0]), {'label':char_labels})
 
             wrapped_model = WrappedModel(self.modules.cfm_model)
             solver = ODESolver(velocity_model=wrapped_model)
 
-            gaussian_log_density = Independent(Normal(torch.zeros(1024, device=self.device), torch.ones(1024, device=self.device)), 1).log_prob
+            gaussian_log_density = Independent(Normal(torch.zeros(1,32,32, device=self.device), torch.ones(1,32,32, device=self.device)), 3).log_prob
 
             log_p_estimate = 0
             for i in range(self.hparams.num_exact_log_p):
                 _, exact_log_p = solver.compute_likelihood(x_1=x_1, method='midpoint', step_size=self.hparams.step_size, exact_divergence=False, log_p0=gaussian_log_density)
                 log_p_estimate += exact_log_p
-            log_p_estimate /= self.hparams.num_exact_log_p 
+            log_p_estimate /= self.hparams.num_exact_log_p  # TODO maybe divide by 1024 too?
 
             log_p_char = self.modules.char_prior(char_labels)
 
