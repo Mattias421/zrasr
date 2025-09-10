@@ -219,7 +219,7 @@ class ASR(sb.Brain):
             for i in range(self.hparams.num_exact_log_p):
                 _, exact_log_p = solver.compute_likelihood(x_1=x_1, method='midpoint', step_size=self.hparams.step_size, exact_divergence=False, log_p0=gaussian_log_density)
                 log_p_estimate += exact_log_p
-            log_p_estimate /= self.hparams.num_exact_log_p
+            log_p_estimate /= self.hparams.num_exact_log_p 
 
             log_p_char = self.modules.char_prior(char_labels)
 
