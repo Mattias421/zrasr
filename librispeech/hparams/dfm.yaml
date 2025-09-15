@@ -33,13 +33,13 @@ data_folder: /store/store4/data/LibriSpeech/
 # data_folder_rirs: !ref <data_folder>
 train_splits: ["train-clean-100"] #, "train-clean-360", "train-other-500"]
 dev_splits: ["dev-clean"]
-test_splits: ["test-clean", "test-other"]
+test_splits: ["test-clean"] #, "test-other"]
 skip_prep: False
 train_csv: !ref <output_folder>/train.csv
 valid_csv: !ref <output_folder>/dev-clean.csv
 test_csv:
     - !ref <output_folder>/test-clean.csv
-    - !ref <output_folder>/test-other.csv
+    # - !ref <output_folder>/test-other.csv
 
 ####################### Training Parameters ####################################
 
@@ -47,8 +47,9 @@ test_csv:
 # The global batch size is computed as batch_size * n_gpus * grad_accumulation_factor.
 # Empirically, we found that this value should be >= 128.
 # Please, set your parameters accordingly.
-number_of_epochs: 110
+number_of_epochs: 10
 batch_size: 16 # This works for 2x GPUs with 32GB
+batch_size_eval: 24 # This works for 2x GPUs with 32GB
 ctc_weight: 0.3
 grad_accumulation_factor: 1
 max_grad_norm: 5.0
@@ -98,10 +99,10 @@ train_dataloader_opts:
     num_workers: !ref <num_workers>
 
 valid_dataloader_opts:
-    batch_size: !ref <batch_size>
+    batch_size: !ref <batch_size_eval>
 
 test_dataloader_opts:
-    batch_size: !ref <batch_size>
+    batch_size: !ref <batch_size_eval>
 
 ####################### Model Parameters #######################################
 
@@ -131,7 +132,7 @@ eos_index: 2
 # Decoding parameters
 min_decode_ratio: 0.0
 max_decode_ratio: 1.0
-valid_search_interval: 10
+valid_search_interval: 11
 valid_beam_size: 10
 test_beam_size: 66
 lm_weight: 0.60
@@ -249,9 +250,11 @@ test_search: !new:speechbrain.decoders.S2STransformerBeamSearcher
 log_softmax: !new:torch.nn.LogSoftmax
     dim: -1
 
-loss_fn: !new:flow_matching.loss.MixturePathGeneralizedKL
-    path: !ref <path>
-    reduction: mean
+# loss_fn: !new:flow_matching.loss.MixturePathGeneralizedKL
+#     path: !ref <path>
+#     reduction: mean
+
+loss_fn: !new:torch.nn.CrossEntropyLoss
 
 ctc_cost: !name:speechbrain.nnet.losses.ctc_loss
     blank_index: !ref <blank_index>
@@ -323,6 +326,8 @@ train_logger: !new:speechbrain.utils.train_logger.WandBLogger
     initializer: !name:wandb.init
     project: dfmasr
     name: !ref <trial_id>
+    config:
+      codebook_layer: !ref <codebook_layer>
 
 error_rate_computer: !name:speechbrain.utils.metric_stats.ErrorRateStats
 acc_computer: !name:speechbrain.utils.Accuracy.AccuracyStats
