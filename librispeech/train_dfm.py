@@ -38,6 +38,7 @@ from speechbrain.utils.logger import get_logger
 import k2
 from flow_matching.utils import ModelWrapper
 from flow_matching.solver import Solver, ODESolver
+from flow_matching.solver import MixtureDiscreteEulerSolver
 
 logger = get_logger(__name__)
 
@@ -49,15 +50,18 @@ class ASR(sb.core.Brain):
         wavs, wav_lens = batch.sig
         wavs, wav_lens = wavs.to(self.device), wav_lens.to(self.device)
 
-        with torch.no_grad():
-            tok, emb = self.modules.dac(wavs[:,None,:])
+        x_0 = self.hparams.codec(wavs)
 
-        x_0 = tok[:,self.hparams.codebook_layer,:]
         tokens_eos = batch.tokens_eos.data
+        if self.hparams.repeat_tokens_n > 0:
+            tokens_eos = torch.repeat_interleave(tokens_eos, self.hparams.repeat_tokens_n, dim=-1)
         x_1 = torch.zeros_like(x_0)
         x_1[:, :tokens_eos.shape[1]] = tokens_eos
 
-        t = torch.rand(x_0.shape[0], device=self.device) * (1.0 - self.hparams.time_epsilon)
+        if stage == sb.Stage.TRAIN:
+            t = torch.rand(x_0.shape[0], device=self.device) * (1.0 - self.hparams.time_epsilon)
+        else:
+            t = torch.zeros(x_0.shape[0], device=self.device)
 
         path_sample = self.hparams.path.sample(t=t, x_0=x_0, x_1=x_1)
 
@@ -71,15 +75,15 @@ class ASR(sb.core.Brain):
                 logits=logits, x_1=x_1, x_t=path_sample.x_t, t=path_sample.t
             ).mean()
 
-        return loss, x_0
+        return loss, x_0, logits, x_1
 
     def compute_objectives(self, predictions, batch, stage):
         """Computes the loss (CTC+NLL) given predictions and targets."""
 
-        loss, x_0 = predictions
+        loss, x_0, logits, tokens_eos = predictions
 
         ids = batch.id
-        tokens_eos, tokens_eos_lens = batch.tokens_eos
+        _, tokens_eos_lens = batch.tokens_eos
         tokens, tokens_lens = batch.tokens
 
         if stage == sb.Stage.TRAIN:
@@ -118,13 +122,11 @@ class ASR(sb.core.Brain):
 
                 wrapped_probability_denoiser = WrappedModel(model=self.modules.Transformer)
 
-                from flow_matching.solver import MixtureDiscreteEulerSolver
                 solver = MixtureDiscreteEulerSolver(
                     model=wrapped_probability_denoiser,
                     path=self.hparams.path,
                     vocabulary_size=self.hparams.output_neurons
                 )
-
 
                 sample = solver.sample(
                     x_init=x_0,
@@ -133,6 +135,8 @@ class ASR(sb.core.Brain):
                     dtype_categorical=torch.float64,
                     time_grid=torch.tensor([0.0, 1.0 - self.hparams.time_epsilon]),
                 )
+
+                sample[sample > 5000] = 0 # for sentencepiece
 
                 sample_list = [s.tolist() for s in sample]
                 sample_list_filtered = [[i for i in s if i != 0] for s in sample_list]
@@ -147,7 +151,7 @@ class ASR(sb.core.Brain):
                 print(target_words)
 
             # compute the accuracy of the one-step-forward prediction
-            # self.acc_metric.append(p_seq, tokens_eos, tokens_eos_lens)
+            self.acc_metric.append(logits, tokens_eos, tokens_eos_lens)
         return loss
 
     # def on_evaluate_start(self, max_key=None, min_key=None):
@@ -168,7 +172,7 @@ class ASR(sb.core.Brain):
     def on_stage_start(self, stage, epoch):
         """Gets called at the beginning of each epoch"""
         if stage != sb.Stage.TRAIN:
-            # self.acc_metric = self.hparams.acc_computer()
+            self.acc_metric = self.hparams.acc_computer()
             self.wer_metric = self.hparams.error_rate_computer()
 
     def on_stage_end(self, stage, stage_loss, epoch):
@@ -178,7 +182,7 @@ class ASR(sb.core.Brain):
         if stage == sb.Stage.TRAIN:
             self.train_stats = stage_stats
         else:
-            # stage_stats["ACC"] = self.acc_metric.summarize()
+            stage_stats["ACC"] = self.acc_metric.summarize()
             current_epoch = self.hparams.epoch_counter.current
             valid_search_interval = self.hparams.valid_search_interval
             if (
@@ -208,7 +212,7 @@ class ASR(sb.core.Brain):
             # )
             self.checkpointer.save_and_keep_only(
                 meta={"loss": stage_stats["loss"], "epoch": epoch},
-                max_keys=["loss"],
+                min_keys=["loss"],
                 num_to_keep=self.hparams.avg_checkpoints,
             )
 
@@ -234,7 +238,7 @@ class ASR(sb.core.Brain):
 
     def on_fit_batch_end(self, batch, outputs, loss, should_step):
         """At the end of the optimizer step, apply noam annealing."""
-        if should_step:
+        if should_step and False:
             self.hparams.noam_annealing(self.optimizer)
 
 
@@ -300,22 +304,37 @@ def dataio_prepare(hparams):
         sig = sb.dataio.dataio.read_audio(wav)
         return sig
 
+    # @sb.utils.data_pipeline.takes("wav", "id")
+    # @sb.utils.data_pipeline.provides("sig", "semantic_code")
+    # def audio_pipeline(wav, ID):
+    #     sig = sb.dataio.dataio.read_audio(wav)
+    #     codec_path = Path(hparams["codec_cache"])/ID
+    #
+    #     if not codec_path.exists():
+    #         Path(hparams["codec_cache"]).mkdir(parents=True, exist_ok=True)
+    #         print(ID)
+    #         semantic_code = run_on_main(hparams["codec"](sig))
+    #         torch.save(semantic_code.cpu(), codec_path)
+    #     else:
+    #         semantic_code = torch.load(codec_path)
+    #     return sig, semantic_code
+
     sb.dataio.dataset.add_dynamic_item(valtest_datasets, audio_pipeline)
 
-    @sb.utils.data_pipeline.takes("wav")
-    @sb.utils.data_pipeline.provides("sig")
-    def audio_pipeline_train(wav):
-        # Speed Perturb is done here so it is multi-threaded with the
-        # workers of the dataloader (faster).
-        if "speed_perturb" in hparams:
-            sig = sb.dataio.dataio.read_audio(wav)
+    # @sb.utils.data_pipeline.takes("wav")
+    # @sb.utils.data_pipeline.provides("sig")
+    # def audio_pipeline_train(wav):
+    #     # Speed Perturb is done here so it is multi-threaded with the
+    #     # workers of the dataloader (faster).
+    #     if "speed_perturb" in hparams:
+    #         sig = sb.dataio.dataio.read_audio(wav)
+    #
+    #         sig = hparams["speed_perturb"](sig.unsqueeze(0)).squeeze(0)
+    #     else:
+    #         sig = sb.dataio.dataio.read_audio(wav)
+    #     return sig
 
-            sig = hparams["speed_perturb"](sig.unsqueeze(0)).squeeze(0)
-        else:
-            sig = sb.dataio.dataio.read_audio(wav)
-        return sig
-
-    sb.dataio.dataset.add_dynamic_item([train_data], audio_pipeline_train)
+    sb.dataio.dataset.add_dynamic_item([train_data], audio_pipeline)
 
     # 3. Define text pipeline:
     @sb.utils.data_pipeline.takes("wrd")
@@ -415,8 +434,6 @@ if __name__ == "__main__":
         valid_bsampler,
     ) = dataio_prepare(hparams)
 
-    # We download the pretrained LM from HuggingFace (or elsewhere depending on
-    # the path given in the YAML file). The tokenizer is loaded at the same time.
     hparams["pretrainer"].collect_files()
     hparams["pretrainer"].load_collected()
 
@@ -476,6 +493,6 @@ if __name__ == "__main__":
         )
         asr_brain.evaluate(
             test_datasets[k],
-            max_key="WER",
+            min_key="loss",
             test_loader_kwargs=hparams["test_dataloader_opts"],
         )

@@ -9,7 +9,7 @@ run_on_gpu() {
   gpu_id=$1
   layers=("${!2}")
   for layer in "${layers[@]}"; do
-    CUDA_VISIBLE_DEVICES=$gpu_id uv run train_dfm.py hparams/dfm.yaml --trial_id=codebook_$layer --codebook_layer=$layer 
+    CUDA_VISIBLE_DEVICES=$gpu_id uv run train_dfm.py hparams/dfm.yaml --number_of_epochs=20 --trial_id=codebook_$layer --codebook_layer=$layer 
   done
 }
 

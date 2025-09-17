@@ -5,9 +5,11 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "dualcodec>=0.4.2",
     "einops>=0.8.1",
     "ffmpeg>=1.4",
     "flow-matching>=1.0.10",
+    "llvmlite>=0.44.0",
     "soundfile>=0.13.1",
     "sox>=1.5.0",
     "transformers>=4.56.0",
