@@ -109,6 +109,16 @@ class ASR(sb.core.Brain):
             self.hparams.train_logger.log_stats(stats_meta={"optimizer_step":self.optimizer_step}, train_stats=train_stats)
 
 
+        logit_pred = logits.argmax(dim=-1)
+        sample_list = [s.tolist() for s in logit_pred]
+        sample_list_filtered = [[i for i in s if i != 0] for s in sample_list]
+
+        # Decode token terms to words
+        predicted_words = [
+            tokenizer.decode_ids(utt_seq).split(" ") for utt_seq in sample_list_filtered
+        ]
+        print(predicted_words)
+
         if stage != sb.Stage.TRAIN:
             current_epoch = self.hparams.epoch_counter.current
             valid_search_interval = self.hparams.valid_search_interval
@@ -136,7 +146,7 @@ class ASR(sb.core.Brain):
                     time_grid=torch.tensor([0.0, 1.0 - self.hparams.time_epsilon]),
                 )
 
-                sample[sample > 5000] = 0 # for sentencepiece
+                sample[sample > 5000] = 0 # trim for sentencepiece
 
                 sample_list = [s.tolist() for s in sample]
                 sample_list_filtered = [[i for i in s if i != 0] for s in sample_list]
@@ -151,7 +161,7 @@ class ASR(sb.core.Brain):
                 print(target_words)
 
             # compute the accuracy of the one-step-forward prediction
-            self.acc_metric.append(logits, tokens_eos, tokens_eos_lens)
+            self.acc_metric.append(logits[:,:tokens.shape[1]], tokens_eos[:,:tokens.shape[1]], tokens_eos_lens)
         return loss
 
     # def on_evaluate_start(self, max_key=None, min_key=None):

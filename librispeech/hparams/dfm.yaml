@@ -115,7 +115,7 @@ n_blocks: 4
 cond_dim: 128
 transformer_dropout: 0.0
 activation: !name:torch.nn.GELU
-output_neurons: 16384
+output_neurons: 5000
 # specify 'hypermixing' for usage of multi-head HyperMixer instead of MultiHeadAttention
 # You can also specify RelPosMHAXL for conformer
 attention_type: hypermixing
@@ -140,7 +140,7 @@ lm_weight: 0.60
 ctc_weight_decode: 0.40
 
 repeat_tokens_n: 0
-codebook_layer: 0
+codebook_layer: 1
 exponent: 1
 time_epsilon: 0
 sampling_steps: 1024
@@ -285,6 +285,5 @@ pretrainer: !new:speechbrain.utils.parameter_transfer.Pretrainer
     paths:
         tokenizer: !ref <pretrained_lm_tokenizer_path>/tokenizer.ckpt
 
-codec: !new:integrations.codec.DualCodec
-    n_quantizers: 1
-    sample_rate: !ref <sample_rate>
+codec: !new:integrations.codec.FACodec
+    codebook_layer: !ref <codebook_layer>
