@@ -24,7 +24,7 @@ codec_cache: audio_cache/codecs
 # speechbrain HuggingFace repository. However, a local path pointing to a
 # directory containing the lm.ckpt and tokenizer.ckpt may also be specified
 # instead. E.g if you want to use your own LM / tokenizer.
-pretrained_lm_tokenizer_path: speechbrain/asr-transformer-transformerlm-librispeech
+pretrained_lm_tokenizer_path: ./results/1K_subword_unigram_960h_LM/1024_unigram.model
 
 # Data files
 data_folder: /store/store4/data/LibriSpeech/
@@ -109,13 +109,13 @@ test_dataloader_opts:
 ####################### Model Parameters #######################################
 
 # Transformer
-d_model: 384
-nhead: 6
-n_blocks: 4
+d_model: 512
+nhead: 8
+n_blocks: 6
 cond_dim: 128
 transformer_dropout: 0.0
 activation: !name:torch.nn.GELU
-output_neurons: 5000
+output_neurons: 1024
 # specify 'hypermixing' for usage of multi-head HyperMixer instead of MultiHeadAttention
 # You can also specify RelPosMHAXL for conformer
 attention_type: hypermixing
@@ -133,7 +133,7 @@ eos_index: 2
 # Decoding parameters
 min_decode_ratio: 0.0
 max_decode_ratio: 1.0
-valid_search_interval: 50
+valid_search_interval: 1
 valid_beam_size: 10
 test_beam_size: 66
 lm_weight: 0.60
@@ -142,7 +142,9 @@ ctc_weight_decode: 0.40
 repeat_tokens_n: 0
 codebook_layer: 1
 exponent: 1
-time_epsilon: 0
+time_epsilon: 1e-3
+t_warmup: 1
+loss_cut_weight: 1
 sampling_steps: 1024
 scheduler: !new:flow_matching.path.scheduler.PolynomialConvexScheduler
     n: !ref <exponent>
@@ -156,7 +158,7 @@ Transformer: !new:model.transformer.Transformer
     masked: false
     hidden_size: !ref <d_model>
     cond_dim: !ref <cond_dim>
-    length: 1024
+    length: 2048
     n_blocks: !ref <n_blocks>
     n_heads: !ref <nhead>
     dropout: !ref <transformer_dropout>
@@ -198,6 +200,7 @@ log_softmax: !new:torch.nn.LogSoftmax
 #     reduction: mean
 
 loss_fn: !new:torch.nn.CrossEntropyLoss
+    ignore_index: !ref <pad_index>
 
 ctc_cost: !name:speechbrain.nnet.losses.ctc_loss
     blank_index: !ref <blank_index>
@@ -283,7 +286,7 @@ pretrainer: !new:speechbrain.utils.parameter_transfer.Pretrainer
     loadables:
         tokenizer: !ref <tokenizer>
     paths:
-        tokenizer: !ref <pretrained_lm_tokenizer_path>/tokenizer.ckpt
+        tokenizer: !ref <pretrained_lm_tokenizer_path>
 
 codec: !new:integrations.codec.FACodec
     codebook_layer: !ref <codebook_layer>

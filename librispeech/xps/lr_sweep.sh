@@ -9,7 +9,7 @@ run_on_gpu() {
   gpu_id=$1
   runs=("${!2}")
   for lr in "${runs[@]}"; do
-    WANDB_TAGS=(lr_sweep) CUDA_VISIBLE_DEVICES=$gpu_id uv run train_dfm.py hparams/dfm.yaml --number_of_epochs=10 --trial_id=lr_$lr --lr_adam=$lr
+    WANDB_TAGS=lr_sweep2 CUDA_VISIBLE_DEVICES=$gpu_id uv run train_dfm.py hparams/dfm.yaml --number_of_epochs=10 --trial_id=lr2_$lr --lr_adam=$lr
   done
 }
 

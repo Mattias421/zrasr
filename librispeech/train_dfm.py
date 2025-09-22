@@ -58,10 +58,10 @@ class ASR(sb.core.Brain):
         x_1 = torch.zeros_like(x_0)
         x_1[:, :tokens_eos.shape[1]] = tokens_eos
 
-        if stage == sb.Stage.TRAIN:
-            t = torch.rand(x_0.shape[0], device=self.device) * (1.0 - self.hparams.time_epsilon)
-        else:
-            t = torch.zeros(x_0.shape[0], device=self.device)
+        t_bound = self.optimizer_step / self.hparams.t_warmup
+        t_bound = min(t_bound, 1.0)
+        t = torch.rand(x_0.shape[0], device=self.device) * (t_bound)
+        t = (1.0 - t)
 
         path_sample = self.hparams.path.sample(t=t, x_0=x_0, x_1=x_1)
 
@@ -69,18 +69,19 @@ class ASR(sb.core.Brain):
 
         if isinstance(self.hparams.loss_fn, torch.nn.CrossEntropyLoss):
             loss = self.hparams.loss_fn(logits.flatten(0, 1), x_1.flatten(0, 1)).mean()
+            loss_cut = self.hparams.loss_fn(logits[:,:tokens_eos.shape[-1]].flatten(0, 1), x_1[:,:tokens_eos.shape[-1]].flatten(0, 1)).mean()
         else:
             # assume MixturePathGeneralizedKL
             loss = self.hparams.loss_fn(
                 logits=logits, x_1=x_1, x_t=path_sample.x_t, t=path_sample.t
             ).mean()
 
-        return loss, x_0, logits, x_1
+        return loss, loss_cut, x_0, logits, x_1
 
     def compute_objectives(self, predictions, batch, stage):
         """Computes the loss (CTC+NLL) given predictions and targets."""
 
-        loss, x_0, logits, tokens_eos = predictions
+        loss, loss_cut, x_0, logits, tokens_eos = predictions
 
         ids = batch.id
         _, tokens_eos_lens = batch.tokens_eos
@@ -105,13 +106,16 @@ class ASR(sb.core.Brain):
                     tokens, tokens_lens, tokens_eos, tokens_eos_lens
                 )
 
-            train_stats = {"loss_step":loss}
+            train_stats = {"loss_step":loss, "loss_cut_step":loss_cut}
             self.hparams.train_logger.log_stats(stats_meta={"optimizer_step":self.optimizer_step}, train_stats=train_stats)
 
+        loss = loss
 
         logit_pred = logits.argmax(dim=-1)
+        logit_pred[:, -1] = 2 # ensure there is at least 1 eos token per utt
         sample_list = [s.tolist() for s in logit_pred]
-        sample_list_filtered = [[i for i in s if i != 0] for s in sample_list]
+        sample_list_filtered = [s[:s.index(2)] for s in sample_list]
+        sample_list_filtered = [[i for i in s if i != 0] for s in sample_list_filtered]
 
         # Decode token terms to words
         predicted_words = [
@@ -146,10 +150,10 @@ class ASR(sb.core.Brain):
                     time_grid=torch.tensor([0.0, 1.0 - self.hparams.time_epsilon]),
                 )
 
-                sample[sample > 5000] = 0 # trim for sentencepiece
 
                 sample_list = [s.tolist() for s in sample]
-                sample_list_filtered = [[i for i in s if i != 0] for s in sample_list]
+                sample_list_filtered = [s[:s.index(2)] for s in sample_list]
+                sample_list_filtered = [[i for i in s if i != 0] for s in sample_list_filtered]
 
                 # Decode token terms to words
                 predicted_words = [
@@ -162,6 +166,8 @@ class ASR(sb.core.Brain):
 
             # compute the accuracy of the one-step-forward prediction
             self.acc_metric.append(logits[:,:tokens.shape[1]], tokens_eos[:,:tokens.shape[1]], tokens_eos_lens)
+            self.acc_metric_pad.append(logits[:,tokens.shape[1]:], tokens_eos[:,tokens.shape[1]:], tokens_eos_lens)
+
         return loss
 
     # def on_evaluate_start(self, max_key=None, min_key=None):
@@ -183,6 +189,7 @@ class ASR(sb.core.Brain):
         """Gets called at the beginning of each epoch"""
         if stage != sb.Stage.TRAIN:
             self.acc_metric = self.hparams.acc_computer()
+            self.acc_metric_pad = self.hparams.acc_computer()
             self.wer_metric = self.hparams.error_rate_computer()
 
     def on_stage_end(self, stage, stage_loss, epoch):
@@ -193,6 +200,7 @@ class ASR(sb.core.Brain):
             self.train_stats = stage_stats
         else:
             stage_stats["ACC"] = self.acc_metric.summarize()
+            stage_stats["ACC_PAD"] = self.acc_metric_pad.summarize()
             current_epoch = self.hparams.epoch_counter.current
             valid_search_interval = self.hparams.valid_search_interval
             if (
