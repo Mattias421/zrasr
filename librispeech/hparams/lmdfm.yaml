@@ -11,7 +11,7 @@
 
 seed: 7775
 __set_seed: !apply:speechbrain.utils.seed_everything [!ref <seed>]
-trial_id: default_dfm
+trial_id: default_lmdfm
 output_folder: !ref results/<trial_id>/<seed>
 output_wer_folder: !ref <output_folder>/
 save_folder: !ref <output_folder>/save
@@ -24,7 +24,8 @@ codec_cache: audio_cache/codecs
 # speechbrain HuggingFace repository. However, a local path pointing to a
 # directory containing the lm.ckpt and tokenizer.ckpt may also be specified
 # instead. E.g if you want to use your own LM / tokenizer.
-pretrained_lm_tokenizer_path: ./results/1K_subword_unigram_960h_LM/1024_unigram.model
+# pretrained_lm_tokenizer_path: ./results/1K_subword_unigram_960h_LM/1024_unigram.model
+pretrained_lm_tokenizer_path: speechbrain/asr-transformer-transformerlm-librispeech/tokenizer.ckpt
 
 # Data files
 data_folder: /store/store4/data/LibriSpeech/
@@ -32,14 +33,14 @@ data_folder: /store/store4/data/LibriSpeech/
 # then data_folder_rirs should be /localscratch/xxx_corpus
 # otherwise the dataset will automatically be downloaded
 # data_folder_rirs: !ref <data_folder>
-train_splits: ["finetuning-9h"] #, "train-clean-360", "train-other-500"]
-dev_splits: ["finetuning-10m"]
-test_splits: ["dev-clean"] #["test-clean"] #, "test-other"]
+train_splits: ["train-clean-100", "train-clean-360", "train-other-500"]
+dev_splits: ["dev-clean"]
+test_splits: ["dev-clean", "dev-other"] #["test-clean"] #, "test-other"]
 skip_prep: False
 train_csv: !ref <output_folder>/train.csv
-valid_csv: !ref <output_folder>/finetuning-10m.csv
+valid_csv: !ref <output_folder>/dev-clean.csv
 test_csv:
-    - !ref <output_folder>/finetuning-10m.csv
+    - !ref <output_folder>/dev-other.csv
     # - !ref <output_folder>/test-clean.csv
     # - !ref <output_folder>/test-other.csv
 
@@ -49,9 +50,9 @@ test_csv:
 # The global batch size is computed as batch_size * n_gpus * grad_accumulation_factor.
 # Empirically, we found that this value should be >= 128.
 # Please, set your parameters accordingly.
-number_of_epochs: 10
-batch_size: 16 # This works for 2x GPUs with 32GB
-batch_size_eval: 24 # This works for 2x GPUs with 32GB
+number_of_epochs: 40
+batch_size: 128
+batch_size_eval: 128 # This works for 2x GPUs with 32GB
 ctc_weight: 0.3
 grad_accumulation_factor: 1
 max_grad_norm: 5.0
@@ -61,8 +62,11 @@ num_workers: 2
 ckpt_interval_minutes: 15 # save checkpoint every N min
 avg_checkpoints: 10 # Number of checkpoints to average for evaluation
 
+precision: fp16
+eval_precision: fp16
+
 # stages related parameters
-lr_adam: 3e-4
+lr_adam: 10
 
 # Feature parameters
 sample_rate: 16000
@@ -109,13 +113,13 @@ test_dataloader_opts:
 ####################### Model Parameters #######################################
 
 # Transformer
-d_model: 512
-nhead: 8
-n_blocks: 6
+d_model: 768
+nhead: 12
+n_blocks: 12
 cond_dim: 128
-transformer_dropout: 0.0
+transformer_dropout: 0.1
 activation: !name:torch.nn.GELU
-output_neurons: 1024
+output_neurons: 5000
 # specify 'hypermixing' for usage of multi-head HyperMixer instead of MultiHeadAttention
 # You can also specify RelPosMHAXL for conformer
 attention_type: hypermixing
@@ -133,7 +137,7 @@ eos_index: 2
 # Decoding parameters
 min_decode_ratio: 0.0
 max_decode_ratio: 1.0
-valid_search_interval: 2
+valid_search_interval: 5
 valid_beam_size: 10
 test_beam_size: 66
 lm_weight: 0.60
@@ -145,7 +149,8 @@ exponent: 1
 time_epsilon: 1e-3
 t_warmup: 1
 loss_cut_weight: 1
-sampling_steps: 1024
+sampling_steps_valid: 256
+sampling_steps_test: 1024
 scheduler: !new:flow_matching.path.scheduler.PolynomialConvexScheduler
     n: !ref <exponent>
 path: !new:flow_matching.path.MixtureDiscreteProbPath
@@ -153,7 +158,7 @@ path: !new:flow_matching.path.MixtureDiscreteProbPath
 
 ############################## Models ##########################################
 
-Transformer: !new:model.transformer.Transformer
+dfm_model: !new:model.transformer.Transformer
     vocab_size: !ref <output_neurons>
     masked: false
     hidden_size: !ref <d_model>
@@ -165,30 +170,18 @@ Transformer: !new:model.transformer.Transformer
 
 tokenizer: !new:sentencepiece.SentencePieceProcessor
 
-ctc_lin: !new:speechbrain.nnet.linear.Linear
-    input_size: !ref <d_model>
-    n_neurons: !ref <output_neurons>
-
-seq_lin: !new:speechbrain.nnet.linear.Linear
-    input_size: !ref <d_model>
-    n_neurons: !ref <output_neurons>
-
 normalize: !new:speechbrain.processing.features.InputNormalization
     norm_type: global
     update_until_epoch: 4
 
 modules:
-    Transformer: !ref <Transformer>
-
-model: !new:torch.nn.ModuleList
-    - [!ref <Transformer>, !ref <seq_lin>, !ref <ctc_lin>]
+    dfm_model: !ref <dfm_model>
 
 # define two optimizers here for two-stage training
 Adam: !name:torch.optim.Adam
     lr: !ref <lr_adam>
-    # betas: (0.9, 0.95)
-    # eps: 1e-8
-    # weight_decay: 0.03
+    betas: (0.9, 0.98)
+    eps: 1e-8
 
 ####################### Decoding & optimiser ###########################
 
@@ -200,7 +193,6 @@ log_softmax: !new:torch.nn.LogSoftmax
 #     reduction: mean
 
 loss_fn: !new:torch.nn.CrossEntropyLoss
-    ignore_index: !ref <pad_index>
 
 ctc_cost: !name:speechbrain.nnet.losses.ctc_loss
     blank_index: !ref <blank_index>
@@ -210,14 +202,17 @@ seq_cost: !name:speechbrain.nnet.losses.kldiv_loss
     label_smoothing: !ref <label_smoothing>
     reduction: !ref <loss_reduction>
 
-noam_annealing: !new:speechbrain.nnet.schedulers.CyclicCosineScheduler
+n_warmup_steps: 10000
+
+noam_annealing: !new:speechbrain.nnet.schedulers.NoamScheduler
     lr_initial: !ref <lr_adam>
-    n_warmup_steps: 5000
+    n_warmup_steps: 250000
+    model_size: !ref <d_model>
 
 checkpointer: !new:speechbrain.utils.checkpoints.Checkpointer
     checkpoints_dir: !ref <save_folder>
     recoverables:
-        model: !ref <model>
+        model: !ref <dfm_model>
         noam_scheduler: !ref <noam_annealing>
         normalizer: !ref <normalize>
         counter: !ref <epoch_counter>
@@ -281,6 +276,37 @@ train_logger: !new:speechbrain.utils.train_logger.WandBLogger
 error_rate_computer: !name:speechbrain.utils.metric_stats.ErrorRateStats
 acc_computer: !name:speechbrain.utils.Accuracy.AccuracyStats
 
+# ASR model
+CNN: !new:speechbrain.lobes.models.convolution.ConvolutionFrontEnd
+    input_shape: (8, 10, 80)
+    num_blocks: 2
+    num_layers_per_block: 1
+    out_channels: (64, 32)
+    kernel_sizes: (3, 3)
+    strides: (2, 2)
+    residuals: (False, False)
+
+Transformer: !new:speechbrain.lobes.models.transformer.TransformerASR.TransformerASR # yamllint disable-line rule:line-length
+    input_size: 640
+    tgt_vocab: !ref <output_neurons>
+    d_model: 144
+    nhead: 4
+    num_encoder_layers: 12
+    num_decoder_layers: 4
+    d_ffn: 1024
+    activation: !name:torch.nn.GELU
+    encoder_module: conformer
+    attention_type: RelPosMHAXL
+    normalize_before: True
+    causal: False
+
+ctc_lin: !new:speechbrain.nnet.linear.Linear
+    input_size: 144
+    n_neurons: !ref <output_neurons>
+
+asr_model: !new:torch.nn.ModuleList
+    - [!ref <CNN>, !ref <Transformer>, !ref <ctc_lin>]
+
 pretrainer: !new:speechbrain.utils.parameter_transfer.Pretrainer
     collect_in: !ref <save_folder>
     loadables:
@@ -288,5 +314,3 @@ pretrainer: !new:speechbrain.utils.parameter_transfer.Pretrainer
     paths:
         tokenizer: !ref <pretrained_lm_tokenizer_path>
 
-codec: !new:integrations.codec.FACodec
-    codebook_layer: !ref <codebook_layer>

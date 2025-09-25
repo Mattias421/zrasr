@@ -39,6 +39,9 @@ import k2
 from flow_matching.utils import ModelWrapper
 from flow_matching.solver import Solver, ODESolver
 from flow_matching.solver import MixtureDiscreteEulerSolver
+from flow_matching.loss import MixturePathGeneralizedKL
+from flow_matching.path import MixtureDiscreteProbPath
+from flow_matching.path.scheduler import PolynomialConvexScheduler
 
 logger = get_logger(__name__)
 
@@ -48,15 +51,14 @@ class ASR(sb.core.Brain):
         """Forward computations from the waveform batches to the output probabilities."""
         batch = batch.to(self.device)
         wavs, wav_lens = batch.sig
-        wavs, wav_lens = wavs.to(self.device), wav_lens.to(self.device)
-
-        x_0 = self.hparams.codec(wavs)
+        # wavs, wav_lens = wavs.to(self.device), wav_lens.to(self.device)
 
         tokens_eos = batch.tokens_eos.data
+        x_0 = torch.randint_like(tokens_eos, high=self.hparams.output_neurons)
+
         if self.hparams.repeat_tokens_n > 0:
             tokens_eos = torch.repeat_interleave(tokens_eos, self.hparams.repeat_tokens_n, dim=-1)
-        x_1 = torch.zeros_like(x_0)
-        x_1[:, :tokens_eos.shape[1]] = tokens_eos
+        x_1 = tokens_eos
 
         t_bound = self.optimizer_step / self.hparams.t_warmup
         t_bound = min(t_bound, 1.0)
@@ -65,7 +67,7 @@ class ASR(sb.core.Brain):
 
         path_sample = self.hparams.path.sample(t=t, x_0=x_0, x_1=x_1)
 
-        logits = self.modules.Transformer(x_t=path_sample.x_t, time=path_sample.t)
+        logits = self.modules.dfm_model(x_t=path_sample.x_t, time=path_sample.t)
 
         if isinstance(self.hparams.loss_fn, torch.nn.CrossEntropyLoss):
             loss = self.hparams.loss_fn(logits.flatten(0, 1), x_1.flatten(0, 1)).mean()
@@ -134,7 +136,7 @@ class ASR(sb.core.Brain):
                         # Note: logit's precision is important.
                         return torch.softmax(self.model(x_t=x, time=t).float(), -1)
 
-                wrapped_probability_denoiser = WrappedModel(model=self.modules.Transformer)
+                wrapped_probability_denoiser = WrappedModel(model=self.modules.dfm_model)
 
                 solver = MixtureDiscreteEulerSolver(
                     model=wrapped_probability_denoiser,
@@ -163,7 +165,40 @@ class ASR(sb.core.Brain):
                 target_words = [wrd.split(" ") for wrd in batch.wrd]
                 self.wer_metric.append(ids, predicted_words, target_words)
                 print(predicted_words)
-                print(target_words)
+
+                # compute ELBO
+                linear_scheduler = PolynomialConvexScheduler(n=1.0)
+                linear_path = MixtureDiscreteProbPath(scheduler=linear_scheduler)
+
+                generalized_kl_fn = MixturePathGeneralizedKL(path=linear_path, reduction="none")
+
+                # Time discretization
+                discretization = (
+                    torch.linspace(0, 1, self.hparams.sampling_steps + 1, device=self.device)[:-1]
+                    .view(-1, 1)
+                    .repeat(1, self.hparams.batch_size_eval)
+                )
+                # Lower variance estimator for time discretization
+                discretization = discretization + torch.rand(
+                    size=(1, self.hparams.batch_size), device=self.device
+                )
+                discretization = discretization % 1
+                discretization = discretization * (1 - self.hparams.time_epsilon)
+                x_1 = tokens_eos
+
+                for k in discretization[:, : x_1.shape[0]]:
+                    x_0 = torch.randint_like(tokens_eos, high=self.hparams.output_neurons)
+                    x_t = linear_path.sample(t=k, x_0=x_0, x_1=x_1).x_t
+
+                    t = self.hparams.path.scheduler.kappa_inverse(k)
+
+                    logits = wrapped_probability_denoiser(x=x_t, t=t)
+
+                    generalized_kl = generalized_kl_fn(logits=logits, x_1=x_1, x_t=x_t, t=k)
+                    self.n_elements += generalized_kl.numel()
+
+                    self.elbo += generalized_kl.sum()
+                breakpoint()
 
             # compute the accuracy of the one-step-forward prediction
             self.acc_metric.append(logits[:,:tokens.shape[1]], tokens_eos[:,:tokens.shape[1]], tokens_eos_lens)
@@ -193,6 +228,9 @@ class ASR(sb.core.Brain):
             self.acc_metric_pad = self.hparams.acc_computer()
             self.wer_metric = self.hparams.error_rate_computer()
 
+            self.n_elements = 0
+            self.elbo = 0
+
     def on_stage_end(self, stage, stage_loss, epoch):
         """Gets called at the end of a epoch."""
         # Compute/store important stats
@@ -201,7 +239,6 @@ class ASR(sb.core.Brain):
             self.train_stats = stage_stats
         else:
             stage_stats["ACC"] = self.acc_metric.summarize()
-            stage_stats["ACC_PAD"] = self.acc_metric_pad.summarize()
             current_epoch = self.hparams.epoch_counter.current
             valid_search_interval = self.hparams.valid_search_interval
             if (
@@ -209,6 +246,7 @@ class ASR(sb.core.Brain):
                 or stage == sb.Stage.TEST
             ):
                 stage_stats["WER"] = self.wer_metric.summarize("error_rate")
+                stage_stats["ELBO"] = torch.exp(self.elbo / self.n_elements).item()
 
         # log stats and save checkpoint at end-of-epoch
         if stage == sb.Stage.VALID:
@@ -257,7 +295,7 @@ class ASR(sb.core.Brain):
 
     def on_fit_batch_end(self, batch, outputs, loss, should_step):
         """At the end of the optimizer step, apply noam annealing."""
-        if should_step and False:
+        if should_step:
             self.hparams.noam_annealing(self.optimizer)
 
 
@@ -494,9 +532,10 @@ if __name__ == "__main__":
             valid_dataloader_opts["collate_fn"] = collate_fn
 
     # Training
+    breakpoint()
     asr_brain.fit(
         asr_brain.hparams.epoch_counter,
-        train_data,
+        valid_data,
         valid_data,
         train_loader_kwargs=train_dataloader_opts,
         valid_loader_kwargs=valid_dataloader_opts,
