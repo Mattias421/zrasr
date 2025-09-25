@@ -16,7 +16,8 @@ output_folder: !ref results/<trial_id>/<seed>
 output_wer_folder: !ref <output_folder>/
 save_folder: !ref <output_folder>/save
 train_log: !ref <output_folder>/train_log.txt
-codec_cache: audio_cache/codecs
+codec_cache: audio_cache/mimi
+audio_lm: false
 
 # Language model (LM) pretraining
 # NB: To avoid mismatch, the speech recognizer must be trained with the same
@@ -25,7 +26,7 @@ codec_cache: audio_cache/codecs
 # directory containing the lm.ckpt and tokenizer.ckpt may also be specified
 # instead. E.g if you want to use your own LM / tokenizer.
 # pretrained_lm_tokenizer_path: ./results/1K_subword_unigram_960h_LM/1024_unigram.model
-pretrained_lm_tokenizer_path: speechbrain/asr-transformer-transformerlm-librispeech/tokenizer.ckpt
+pretrained_lm_tokenizer_path: results/tokenizer_text_mimi/2048_unigram.model
 
 # Data files
 data_folder: /store/store4/data/LibriSpeech/
@@ -35,7 +36,7 @@ data_folder: /store/store4/data/LibriSpeech/
 # data_folder_rirs: !ref <data_folder>
 train_splits: ["train-clean-100", "train-clean-360", "train-other-500"]
 dev_splits: ["dev-clean"]
-test_splits: ["dev-clean", "dev-other"] #["test-clean"] #, "test-other"]
+test_splits: ["dev-other"] # ["test-clean", "test-other"]
 skip_prep: False
 train_csv: !ref <output_folder>/train.csv
 valid_csv: !ref <output_folder>/dev-clean.csv
@@ -52,7 +53,7 @@ test_csv:
 # Please, set your parameters accordingly.
 number_of_epochs: 40
 batch_size: 128
-batch_size_eval: 128 # This works for 2x GPUs with 32GB
+batch_size_eval: 256
 ctc_weight: 0.3
 grad_accumulation_factor: 1
 max_grad_norm: 5.0
@@ -119,7 +120,7 @@ n_blocks: 12
 cond_dim: 128
 transformer_dropout: 0.1
 activation: !name:torch.nn.GELU
-output_neurons: 5000
+output_neurons: 2048
 # specify 'hypermixing' for usage of multi-head HyperMixer instead of MultiHeadAttention
 # You can also specify RelPosMHAXL for conformer
 attention_type: hypermixing
@@ -137,7 +138,7 @@ eos_index: 2
 # Decoding parameters
 min_decode_ratio: 0.0
 max_decode_ratio: 1.0
-valid_search_interval: 5
+valid_search_interval: 500
 valid_beam_size: 10
 test_beam_size: 66
 lm_weight: 0.60
@@ -146,7 +147,6 @@ ctc_weight_decode: 0.40
 repeat_tokens_n: 0
 codebook_layer: 1
 exponent: 1
-time_epsilon: 1e-3
 t_warmup: 1
 loss_cut_weight: 1
 sampling_steps_valid: 256
@@ -163,7 +163,7 @@ dfm_model: !new:model.transformer.Transformer
     masked: false
     hidden_size: !ref <d_model>
     cond_dim: !ref <cond_dim>
-    length: 2048
+    length: 1024
     n_blocks: !ref <n_blocks>
     n_heads: !ref <nhead>
     dropout: !ref <transformer_dropout>
@@ -188,11 +188,11 @@ Adam: !name:torch.optim.Adam
 log_softmax: !new:torch.nn.LogSoftmax
     dim: -1
 
-# loss_fn: !new:flow_matching.loss.MixturePathGeneralizedKL
-#     path: !ref <path>
-#     reduction: mean
+loss_fn: !new:flow_matching.loss.MixturePathGeneralizedKL
+    path: !ref <path>
+    reduction: mean
 
-loss_fn: !new:torch.nn.CrossEntropyLoss
+# loss_fn: !new:torch.nn.CrossEntropyLoss
 
 ctc_cost: !name:speechbrain.nnet.losses.ctc_loss
     blank_index: !ref <blank_index>
@@ -202,11 +202,11 @@ seq_cost: !name:speechbrain.nnet.losses.kldiv_loss
     label_smoothing: !ref <label_smoothing>
     reduction: !ref <loss_reduction>
 
-n_warmup_steps: 10000
+n_warmup_steps: 250000
 
 noam_annealing: !new:speechbrain.nnet.schedulers.NoamScheduler
     lr_initial: !ref <lr_adam>
-    n_warmup_steps: 250000
+    n_warmup_steps: !ref <n_warmup_steps>
     model_size: !ref <d_model>
 
 checkpointer: !new:speechbrain.utils.checkpoints.Checkpointer
@@ -314,3 +314,7 @@ pretrainer: !new:speechbrain.utils.parameter_transfer.Pretrainer
     paths:
         tokenizer: !ref <pretrained_lm_tokenizer_path>
 
+codec: !new:speechbrain.integrations.huggingface.mimi.Mimi
+    source: kyutai/mimi
+    save_path: pretrained_models/mimi
+    sample_rate: !ref <sample_rate>

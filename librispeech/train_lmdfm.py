@@ -50,65 +50,43 @@ class ASR(sb.core.Brain):
     def compute_forward(self, batch, stage):
         """Forward computations from the waveform batches to the output probabilities."""
         batch = batch.to(self.device)
-        wavs, wav_lens = batch.sig
-        # wavs, wav_lens = wavs.to(self.device), wav_lens.to(self.device)
+        if self.hparams.audio_lm:
+            codec_tokens, codec_token_lens = batch.codec_tokens
+            codec_tokens, codec_token_lens = codec_tokens.to(self.device), codec_token_lens.to(self.device)
+            x_1 = codec_tokens
+            x_1_lens = codec_token_lens
+            if x_1.shape[-1] > 1024:
+                raise ValueError(f"length of {x_1.shape[-1]} is larger than 1024")
+        else:
+            x_1, x_1_lens = batch.tokens_bos_eos
 
-        tokens_eos = batch.tokens_eos.data
-        x_0 = torch.randint_like(tokens_eos, high=self.hparams.output_neurons)
+        x_0 = torch.randint_like(x_1, high=self.hparams.output_neurons)
 
-        if self.hparams.repeat_tokens_n > 0:
-            tokens_eos = torch.repeat_interleave(tokens_eos, self.hparams.repeat_tokens_n, dim=-1)
-        x_1 = tokens_eos
-
-        t_bound = self.optimizer_step / self.hparams.t_warmup
-        t_bound = min(t_bound, 1.0)
-        t = torch.rand(x_0.shape[0], device=self.device) * (t_bound)
-        t = (1.0 - t)
-
+        t = torch.rand(x_1.shape[0], device=x_1.device) * (1.0 - self.time_epsilon)
         path_sample = self.hparams.path.sample(t=t, x_0=x_0, x_1=x_1)
 
         logits = self.modules.dfm_model(x_t=path_sample.x_t, time=path_sample.t)
 
         if isinstance(self.hparams.loss_fn, torch.nn.CrossEntropyLoss):
             loss = self.hparams.loss_fn(logits.flatten(0, 1), x_1.flatten(0, 1)).mean()
-            loss_cut = self.hparams.loss_fn(logits[:,:tokens_eos.shape[-1]].flatten(0, 1), x_1[:,:tokens_eos.shape[-1]].flatten(0, 1)).mean()
         else:
             # assume MixturePathGeneralizedKL
             loss = self.hparams.loss_fn(
                 logits=logits, x_1=x_1, x_t=path_sample.x_t, t=path_sample.t
             ).mean()
 
-        return loss, loss_cut, x_0, logits, x_1
+        return loss, x_0, logits, x_1, x_1_lens
 
     def compute_objectives(self, predictions, batch, stage):
         """Computes the loss (CTC+NLL) given predictions and targets."""
 
-        loss, loss_cut, x_0, logits, tokens_eos = predictions
+        loss, x_0, logits, x_1, x_1_lens = predictions
 
         ids = batch.id
-        _, tokens_eos_lens = batch.tokens_eos
         tokens, tokens_lens = batch.tokens
 
         if stage == sb.Stage.TRAIN:
-            # Labels must be extended if parallel augmentation or concatenated
-            # augmentation was performed on the input (increasing the time dimension)
-            augment_warmup = 0
-            if hasattr(self.hparams, "augment_warmup"):
-                augment_warmup = self.hparams.augment_warmup
-            if (
-                hasattr(self.hparams, "fea_augment")
-                and self.optimizer_step > augment_warmup
-            ):
-                (
-                    tokens,
-                    tokens_lens,
-                    tokens_eos,
-                    tokens_eos_lens,
-                ) = self.hparams.fea_augment.replicate_multiple_labels(
-                    tokens, tokens_lens, tokens_eos, tokens_eos_lens
-                )
-
-            train_stats = {"loss_step":loss, "loss_cut_step":loss_cut}
+            train_stats = {"loss_step":loss}
             self.hparams.train_logger.log_stats(stats_meta={"optimizer_step":self.optimizer_step}, train_stats=train_stats)
 
         loss = loss
@@ -125,17 +103,51 @@ class ASR(sb.core.Brain):
         ]
 
         if stage != sb.Stage.TRAIN:
+            # compute ELBO
+            linear_scheduler = PolynomialConvexScheduler(n=1.0)
+            linear_path = MixtureDiscreteProbPath(scheduler=linear_scheduler)
+
+            generalized_kl_fn = MixturePathGeneralizedKL(path=linear_path, reduction="none")
+
+            class WrappedModel(ModelWrapper):
+                def forward(self, x, t, **extras):
+                    # Note: logit's precision is important.
+                    return torch.softmax(self.model(x_t=x, time=t).float(), -1)
+
+            wrapped_probability_denoiser = WrappedModel(model=self.modules.dfm_model)
+
+            # Time discretization
+            sampling_steps = self.hparams.sampling_steps_test if stage == sb.Stage.TEST else self.hparams.sampling_steps_valid
+            discretization = (
+                torch.linspace(0, 1, sampling_steps + 1, device=self.device)[:-1]
+                .view(-1, 1)
+                .repeat(1, self.hparams.batch_size_eval)
+            )
+            # Lower variance estimator for time discretization
+            discretization = discretization + torch.rand(
+                size=(1, self.hparams.batch_size_eval), device=self.device
+            )
+            discretization = discretization % 1
+            discretization = discretization * (1 - self.time_epsilon)
+
+            for k in discretization[:, : x_1.shape[0]]:
+                x_0 = torch.randint_like(x_1, high=self.hparams.output_neurons)
+                x_t = linear_path.sample(t=k, x_0=x_0, x_1=x_1).x_t
+
+                t = self.hparams.path.scheduler.kappa_inverse(k)
+
+                logits = wrapped_probability_denoiser(x=x_t, t=t)
+
+                generalized_kl = generalized_kl_fn(logits=logits, x_1=x_1, x_t=x_t, t=k)
+                self.n_elements += generalized_kl.numel()
+
+                self.elbo += generalized_kl.sum()
+
             current_epoch = self.hparams.epoch_counter.current
             valid_search_interval = self.hparams.valid_search_interval
             if current_epoch % valid_search_interval == 0 or (
                 stage == sb.Stage.TEST
             ):
-                class WrappedModel(ModelWrapper):
-                    def forward(self, x, t, **extras):
-                        # Note: logit's precision is important.
-                        return torch.softmax(self.model(x_t=x, time=t).float(), -1)
-
-                wrapped_probability_denoiser = WrappedModel(model=self.modules.dfm_model)
 
                 solver = MixtureDiscreteEulerSolver(
                     model=wrapped_probability_denoiser,
@@ -143,14 +155,13 @@ class ASR(sb.core.Brain):
                     vocabulary_size=self.hparams.output_neurons
                 )
 
-                sampling_steps = self.hparams.sampling_steps_test if stage == sb.Stage.TEST else self.hparams.sampling_steps_valid
 
                 sample = solver.sample(
                     x_init=x_0,
                     step_size=1 / sampling_steps,
                     verbose=True,
                     dtype_categorical=torch.float64,
-                    time_grid=torch.tensor([0.0, 1.0 - self.hparams.time_epsilon]),
+                    time_grid=torch.tensor([0.0, 1.0 - self.time_epsilon]),
                 )
 
 
@@ -167,59 +178,12 @@ class ASR(sb.core.Brain):
                 self.wer_metric.append(ids, predicted_words, target_words)
                 print(predicted_words)
 
-                # compute ELBO
-                linear_scheduler = PolynomialConvexScheduler(n=1.0)
-                linear_path = MixtureDiscreteProbPath(scheduler=linear_scheduler)
-
-                generalized_kl_fn = MixturePathGeneralizedKL(path=linear_path, reduction="none")
-
-                # Time discretization
-                discretization = (
-                    torch.linspace(0, 1, sampling_steps + 1, device=self.device)[:-1]
-                    .view(-1, 1)
-                    .repeat(1, self.hparams.batch_size_eval)
-                )
-                # Lower variance estimator for time discretization
-                discretization = discretization + torch.rand(
-                    size=(1, self.hparams.batch_size), device=self.device
-                )
-                discretization = discretization % 1
-                discretization = discretization * (1 - self.hparams.time_epsilon)
-                x_1 = tokens_eos
-
-                for k in discretization[:, : x_1.shape[0]]:
-                    x_0 = torch.randint_like(tokens_eos, high=self.hparams.output_neurons)
-                    x_t = linear_path.sample(t=k, x_0=x_0, x_1=x_1).x_t
-
-                    t = self.hparams.path.scheduler.kappa_inverse(k)
-
-                    logits = wrapped_probability_denoiser(x=x_t, t=t)
-
-                    generalized_kl = generalized_kl_fn(logits=logits, x_1=x_1, x_t=x_t, t=k)
-                    self.n_elements += generalized_kl.numel()
-
-                    self.elbo += generalized_kl.sum()
 
             # compute the accuracy of the one-step-forward prediction
-            self.acc_metric.append(logits[:,:tokens.shape[1]], tokens_eos[:,:tokens.shape[1]], tokens_eos_lens)
-            self.acc_metric_pad.append(logits[:,tokens.shape[1]:], tokens_eos[:,tokens.shape[1]:], tokens_eos_lens)
+            self.acc_metric.append(logits, x_1, x_1_lens)
+            self.acc_metric_pad.append(logits, x_1, x_1_lens)
 
         return loss
-
-    # def on_evaluate_start(self, max_key=None, min_key=None):
-    #     """perform checkpoint average if needed"""
-    #     super().on_evaluate_start()
-    #
-    #     ckpts = self.checkpointer.find_checkpoints(
-    #         max_key=max_key, min_key=min_key
-    #     )
-    #     ckpt = sb.utils.checkpoints.average_checkpoints(
-    #         ckpts, recoverable_name="model"
-    #     )
-    #
-    #     self.hparams.model.load_state_dict(ckpt, strict=True)
-    #     self.hparams.model.eval()
-    #     print("Loaded the average")
 
     def on_stage_start(self, stage, epoch):
         """Gets called at the beginning of each epoch"""
@@ -228,8 +192,8 @@ class ASR(sb.core.Brain):
             self.acc_metric_pad = self.hparams.acc_computer()
             self.wer_metric = self.hparams.error_rate_computer()
 
-            self.n_elements = 0
-            self.elbo = 0
+            self.elbo = torch.zeros((1,), device=self.device)
+            self.n_elements = torch.zeros((1,), device=self.device)
 
     def on_stage_end(self, stage, stage_loss, epoch):
         """Gets called at the end of a epoch."""
@@ -239,6 +203,7 @@ class ASR(sb.core.Brain):
             self.train_stats = stage_stats
         else:
             stage_stats["ACC"] = self.acc_metric.summarize()
+            stage_stats["ELBO"] = torch.exp(self.elbo / self.n_elements).item()
             current_epoch = self.hparams.epoch_counter.current
             valid_search_interval = self.hparams.valid_search_interval
             if (
@@ -246,7 +211,6 @@ class ASR(sb.core.Brain):
                 or stage == sb.Stage.TEST
             ):
                 stage_stats["WER"] = self.wer_metric.summarize("error_rate")
-                stage_stats["ELBO"] = torch.exp(self.elbo / self.n_elements).item()
 
         # log stats and save checkpoint at end-of-epoch
         if stage == sb.Stage.VALID:
@@ -268,8 +232,8 @@ class ASR(sb.core.Brain):
             #     num_to_keep=self.hparams.avg_checkpoints,
             # )
             self.checkpointer.save_and_keep_only(
-                meta={"loss": stage_stats["loss"], "epoch": epoch},
-                max_keys=["loss"],
+                meta=stage_stats,
+                max_keys=["ELBO"],
                 num_to_keep=self.hparams.avg_checkpoints,
             )
 
@@ -355,57 +319,29 @@ def dataio_prepare(hparams):
     tokenizer = hparams["tokenizer"]
 
     # 2. Define audio pipeline:
-    @sb.utils.data_pipeline.takes("wav")
-    @sb.utils.data_pipeline.provides("sig")
-    def audio_pipeline(wav):
-        sig = sb.dataio.dataio.read_audio(wav)
-        return sig
-
-    # @sb.utils.data_pipeline.takes("wav", "id")
-    # @sb.utils.data_pipeline.provides("sig", "semantic_code")
-    # def audio_pipeline(wav, ID):
-    #     sig = sb.dataio.dataio.read_audio(wav)
-    #     codec_path = Path(hparams["codec_cache"])/ID
-    #
-    #     if not codec_path.exists():
-    #         Path(hparams["codec_cache"]).mkdir(parents=True, exist_ok=True)
-    #         print(ID)
-    #         semantic_code = run_on_main(hparams["codec"](sig))
-    #         torch.save(semantic_code.cpu(), codec_path)
-    #     else:
-    #         semantic_code = torch.load(codec_path)
-    #     return sig, semantic_code
+    @sb.utils.data_pipeline.takes("id")
+    @sb.utils.data_pipeline.provides("codec_tokens")
+    def audio_pipeline(ID):
+        tokens = torch.load(hparams['codec_cache'] + f"/{ID}.pt")
+        tokens[0] = hparams["bos_index"]
+        tokens[-1] = hparams["eos_index"] # TODO check that performance on final tokens is correct
+        return tokens
 
     sb.dataio.dataset.add_dynamic_item(valtest_datasets, audio_pipeline)
-
-    # @sb.utils.data_pipeline.takes("wav")
-    # @sb.utils.data_pipeline.provides("sig")
-    # def audio_pipeline_train(wav):
-    #     # Speed Perturb is done here so it is multi-threaded with the
-    #     # workers of the dataloader (faster).
-    #     if "speed_perturb" in hparams:
-    #         sig = sb.dataio.dataio.read_audio(wav)
-    #
-    #         sig = hparams["speed_perturb"](sig.unsqueeze(0)).squeeze(0)
-    #     else:
-    #         sig = sb.dataio.dataio.read_audio(wav)
-    #     return sig
 
     sb.dataio.dataset.add_dynamic_item([train_data], audio_pipeline)
 
     # 3. Define text pipeline:
     @sb.utils.data_pipeline.takes("wrd")
     @sb.utils.data_pipeline.provides(
-        "wrd", "tokens_list", "tokens_bos", "tokens_eos", "tokens"
+        "wrd", "tokens_list", "tokens_bos_eos", "tokens"
     )
     def text_pipeline(wrd):
         yield wrd
         tokens_list = tokenizer.encode_as_ids(wrd)
         yield tokens_list
-        tokens_bos = torch.LongTensor([hparams["bos_index"]] + (tokens_list))
-        yield tokens_bos
-        tokens_eos = torch.LongTensor(tokens_list + [hparams["eos_index"]])
-        yield tokens_eos
+        tokens_bos_eos = torch.LongTensor([hparams["bos_index"]] + (tokens_list) + [hparams["eos_index"]])
+        yield tokens_bos_eos
         tokens = torch.LongTensor(tokens_list)
         yield tokens
 
@@ -414,7 +350,7 @@ def dataio_prepare(hparams):
     # 4. Set output:
     sb.dataio.dataset.set_output_keys(
         datasets,
-        ["id", "sig", "wrd", "tokens_bos", "tokens_eos", "tokens"],
+        ["id", "codec_tokens", "wrd", "tokens_bos_eos", "tokens"],
     )
 
     # 5. If Dynamic Batching is used, we instantiate the needed samplers.
@@ -503,6 +439,8 @@ if __name__ == "__main__":
         checkpointer=hparams["checkpointer"],
     )
 
+    asr_brain.time_epsilon = 1e-3 if isinstance(asr_brain.hparams.loss_fn, MixturePathGeneralizedKL) else 0.0
+
     # adding objects to trainer:
     asr_brain.tokenizer = hparams["tokenizer"]
     train_dataloader_opts = hparams["train_dataloader_opts"]
@@ -546,10 +484,10 @@ if __name__ == "__main__":
 
     for k in test_datasets.keys():  # keys are test_clean, test_other etc
         asr_brain.hparams.test_wer_file = os.path.join(
-            hparams["output_wer_folder"], f"wer_{k}.txt"
+            hparams["output_wer_folder"], f"wer_{k}_{hparams['sampling_steps_test']}_NFE.txt"
         )
         asr_brain.evaluate(
             test_datasets[k],
-            min_key="loss",
+            max_key="ELBO",
             test_loader_kwargs=hparams["test_dataloader_opts"],
         )
