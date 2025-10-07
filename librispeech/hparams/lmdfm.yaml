@@ -36,12 +36,13 @@ data_folder: /store/store4/data/LibriSpeech/
 # data_folder_rirs: !ref <data_folder>
 train_splits: ["train-clean-100", "train-clean-360", "train-other-500"]
 dev_splits: ["dev-clean"]
-test_splits: ["dev-other"] # ["test-clean", "test-other"]
+test_splits: ["dev-other", "dev-clean"] # ["test-clean", "test-other"]
 skip_prep: False
 train_csv: !ref <output_folder>/train.csv
 valid_csv: !ref <output_folder>/dev-clean.csv
 test_csv:
     - !ref <output_folder>/dev-other.csv
+    - !ref <output_folder>/dev-clean.csv
     # - !ref <output_folder>/test-clean.csv
     # - !ref <output_folder>/test-other.csv
 
@@ -51,7 +52,7 @@ test_csv:
 # The global batch size is computed as batch_size * n_gpus * grad_accumulation_factor.
 # Empirically, we found that this value should be >= 128.
 # Please, set your parameters accordingly.
-number_of_epochs: 40
+number_of_epochs: 160
 batch_size: 128
 batch_size_eval: 256
 ctc_weight: 0.3
@@ -61,7 +62,7 @@ loss_reduction: 'batchmean'
 sorting: random
 num_workers: 2
 ckpt_interval_minutes: 15 # save checkpoint every N min
-avg_checkpoints: 10 # Number of checkpoints to average for evaluation
+avg_checkpoints: 2 # Number of checkpoints to average for evaluation
 
 precision: fp16
 eval_precision: fp16
@@ -149,7 +150,7 @@ codebook_layer: 1
 exponent: 1
 t_warmup: 1
 loss_cut_weight: 1
-sampling_steps_valid: 256
+sampling_steps_valid: 16
 sampling_steps_test: 1024
 scheduler: !new:flow_matching.path.scheduler.PolynomialConvexScheduler
     n: !ref <exponent>

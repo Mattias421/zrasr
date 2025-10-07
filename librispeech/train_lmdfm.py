@@ -226,14 +226,10 @@ class ASR(sb.core.Brain):
                 train_stats=self.train_stats,
                 valid_stats=stage_stats,
             )
-            # self.checkpointer.save_and_keep_only(
-            #     meta={"ACC": stage_stats["ACC"], "epoch": epoch},
-            #     max_keys=["ACC"],
-            #     num_to_keep=self.hparams.avg_checkpoints,
-            # )
+
             self.checkpointer.save_and_keep_only(
                 meta=stage_stats,
-                max_keys=["ELBO"],
+                min_keys=["loss"],
                 num_to_keep=self.hparams.avg_checkpoints,
             )
 
@@ -488,6 +484,6 @@ if __name__ == "__main__":
         )
         asr_brain.evaluate(
             test_datasets[k],
-            max_key="ELBO",
+            min_key="loss",
             test_loader_kwargs=hparams["test_dataloader_opts"],
         )
