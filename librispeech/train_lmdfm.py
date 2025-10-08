@@ -35,7 +35,6 @@ import speechbrain.integrations.k2_fsa as sbk2
 from speechbrain.utils.distributed import if_main_process, run_on_main
 from speechbrain.utils.logger import get_logger
 
-import k2
 from flow_matching.utils import ModelWrapper
 from flow_matching.solver import Solver, ODESolver
 from flow_matching.solver import MixtureDiscreteEulerSolver
@@ -475,15 +474,16 @@ if __name__ == "__main__":
     )
 
     # Testing
-    if not os.path.exists(hparams["output_wer_folder"]):
-        os.makedirs(hparams["output_wer_folder"])
+    if not hparams["train_only"]:
+        if not os.path.exists(hparams["output_wer_folder"]):
+            os.makedirs(hparams["output_wer_folder"])
 
-    for k in test_datasets.keys():  # keys are test_clean, test_other etc
-        asr_brain.hparams.test_wer_file = os.path.join(
-            hparams["output_wer_folder"], f"wer_{k}_{hparams['sampling_steps_test']}_NFE.txt"
-        )
-        asr_brain.evaluate(
-            test_datasets[k],
-            min_key="loss",
-            test_loader_kwargs=hparams["test_dataloader_opts"],
-        )
+        for k in test_datasets.keys():  # keys are test_clean, test_other etc
+            asr_brain.hparams.test_wer_file = os.path.join(
+                hparams["output_wer_folder"], f"wer_{k}_{hparams['sampling_steps_test']}_NFE.txt"
+            )
+            asr_brain.evaluate(
+                test_datasets[k],
+                min_key="loss",
+                test_loader_kwargs=hparams["test_dataloader_opts"],
+            )

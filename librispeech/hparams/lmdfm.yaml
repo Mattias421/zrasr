@@ -18,6 +18,11 @@ save_folder: !ref <output_folder>/save
 train_log: !ref <output_folder>/train_log.txt
 codec_cache: audio_cache/mimi
 audio_lm: false
+kenlm_dir: !ref <output_folder>/kenlm
+kenlm_lmplz: /exp/exp4/acq22mc/kenlm/build/bin/lmplz
+target_ref_tokens: 500000
+target_hyp_tokens: 500000
+train_only: false
 
 # Language model (LM) pretraining
 # NB: To avoid mismatch, the speech recognizer must be trained with the same
@@ -65,7 +70,7 @@ ckpt_interval_minutes: 15 # save checkpoint every N min
 avg_checkpoints: 2 # Number of checkpoints to average for evaluation
 
 precision: fp16
-eval_precision: fp16
+eval_precision: fp32
 
 # stages related parameters
 lr_adam: 10
@@ -270,6 +275,9 @@ train_logger: !new:speechbrain.utils.train_logger.WandBLogger
     name: !ref <trial_id>
     config:
       lr: !ref <lr_adam>
+      n_warmup_steps: !ref <n_warmup_steps>
+      d_model: !ref <d_model>
+      transformer_dropout: !ref <transformer_dropout>
       train_splits: !ref <train_splits>
       dev_splits: !ref <dev_splits>
       test_splits: !ref <test_splits>

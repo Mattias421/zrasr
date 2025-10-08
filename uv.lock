@@ -1129,6 +1129,12 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/a1/19/c9e1596b5572c786b93428d0904280e964c930fae7e6c9368ed9e1b63922/julius-0.2.7.tar.gz", hash = "sha256:3c0f5f5306d7d6016fcc95196b274cae6f07e2c9596eed314e4e7641554fbb08", size = 59640 }
 
 [[package]]
+name = "kenlm"
+version = "0.3.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/02/6e/f4e159cef39ea4ef2244b4aa32857d447d60a5d0ee269e1b1f8d3723c03e/kenlm-0.3.0.tar.gz", hash = "sha256:c4628bb9fb63c8a6f9240035b8b037385cfc404cb72e933cf48878291edac1e8", size = 427500 }
+
+[[package]]
 name = "kiwisolver"
 version = "1.4.9"
 source = { registry = "https://pypi.org/simple" }
@@ -3264,6 +3270,7 @@ dependencies = [
     { name = "einops" },
     { name = "ffmpeg" },
     { name = "flow-matching" },
+    { name = "kenlm" },
     { name = "llvmlite" },
     { name = "soundfile" },
     { name = "sox" },
@@ -3277,6 +3284,7 @@ requires-dist = [
     { name = "einops", specifier = ">=0.8.1" },
     { name = "ffmpeg", specifier = ">=1.4" },
     { name = "flow-matching", specifier = ">=1.0.10" },
+    { name = "kenlm", specifier = ">=0.3.0" },
     { name = "llvmlite", specifier = ">=0.44.0" },
     { name = "soundfile", specifier = ">=0.13.1" },
     { name = "sox", specifier = ">=1.5.0" },
