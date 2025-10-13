@@ -49,17 +49,28 @@ class ASR(sb.core.Brain):
     def compute_forward(self, batch, stage):
         """Forward computations from the waveform batches to the output probabilities."""
         batch = batch.to(self.device)
-        if self.hparams.audio_lm:
-            codec_tokens, codec_token_lens = batch.codec_tokens
-            codec_tokens, codec_token_lens = codec_tokens.to(self.device), codec_token_lens.to(self.device)
-            x_1 = codec_tokens
-            x_1_lens = codec_token_lens
-            if x_1.shape[-1] > 1024:
-                raise ValueError(f"length of {x_1.shape[-1]} is larger than 1024")
-        else:
-            x_1, x_1_lens = batch.tokens_bos_eos
+
+        codec_tokens, codec_token_lens = batch.codec_tokens
+        text_tokens, text_token_lens = batch.tokens_bos_eos
+        # codec_tokens, codec_token_lens = codec_tokens.to(self.device), codec_token_lens.to(self.device)
+        # space for both text and audio tokens, and task indicator token
+        batch_size_half =  codec_tokens.shape[0]
+        x_1 = torch.zeros((batch_size_half * 2, codec_tokens.shape[1] + 1), device=self.device, dtype=codec_tokens.dtype)
+        x_1[:batch_size_half, 0] = self.audio_mode_token
+        x_1[batch_size_half:, 0] = self.text_mode_token
+
+        x_1[:batch_size_half, 1:] = codec_tokens
+
+        x_1[batch_size_half:, 1:text_tokens.shape[1]+1] = text_tokens
+        x_1_lens = torch.concatenate((codec_token_lens, text_token_lens * (text_tokens.shape[1]/codec_tokens.shape[1])))
 
         x_0 = torch.randint_like(x_1, high=self.hparams.output_neurons)
+
+        # add task and bos tokens
+        x_0[:batch_size_half, 0] = self.audio_mode_token
+        x_0[batch_size_half:, 0] = self.text_mode_token
+        x_0[:batch_size_half, 1] = 1
+        x_0[batch_size_half:, 1] = 1
 
         t = torch.rand(x_1.shape[0], device=x_1.device) * (1.0 - self.time_epsilon)
         path_sample = self.hparams.path.sample(t=t, x_0=x_0, x_1=x_1)
@@ -67,25 +78,32 @@ class ASR(sb.core.Brain):
         logits = self.modules.dfm_model(x_t=path_sample.x_t, time=path_sample.t)
 
         if isinstance(self.hparams.loss_fn, torch.nn.CrossEntropyLoss):
-            loss = self.hparams.loss_fn(logits.flatten(0, 1), x_1.flatten(0, 1)).mean()
+            loss_full = self.hparams.loss_fn(logits.flatten(0, 1), x_1.flatten(0, 1))
+            loss = loss_full.mean()
+            loss_audio = loss_full[:batch_size_half].mean()
+            loss_text = loss_full[batch_size_half:].mean()
+
         else:
             # assume MixturePathGeneralizedKL
-            loss = self.hparams.loss_fn(
+            loss_full = self.hparams.loss_fn(
                 logits=logits, x_1=x_1, x_t=path_sample.x_t, t=path_sample.t
-            ).mean()
+            )
 
-        return loss, x_0, logits, x_1, x_1_lens
+            loss = loss_full.mean()
+            loss_audio = loss_full[:batch_size_half].mean()
+            loss_text = loss_full[batch_size_half:].mean()
+
+        return loss, loss_audio, loss_text, x_0, logits, x_1, x_1_lens
 
     def compute_objectives(self, predictions, batch, stage):
         """Computes the loss (CTC+NLL) given predictions and targets."""
 
-        loss, x_0, logits, x_1, x_1_lens = predictions
+        loss, loss_audio, loss_text, x_0, logits, x_1, x_1_lens = predictions
 
-        ids = batch.id
         tokens, tokens_lens = batch.tokens
 
         if stage == sb.Stage.TRAIN:
-            train_stats = {"loss_step":loss}
+            train_stats = {"loss_step":loss, "loss_audio":loss_audio, "loss_text":loss_text}
             self.hparams.train_logger.log_stats(stats_meta={"optimizer_step":self.optimizer_step}, train_stats=train_stats)
 
         loss = loss
@@ -97,90 +115,99 @@ class ASR(sb.core.Brain):
         sample_list_filtered = [[i for i in s if i != 0] for s in sample_list_filtered]
 
         # Decode token terms to words
-        predicted_words = [
-            tokenizer.decode_ids(utt_seq).split(" ") for utt_seq in sample_list_filtered
-        ]
+        # predicted_words = [
+        #     tokenizer.decode_ids(utt_seq).split(" ") for utt_seq in sample_list_filtered
+        # ]
 
         if stage != sb.Stage.TRAIN:
             # compute ELBO
-            linear_scheduler = PolynomialConvexScheduler(n=1.0)
-            linear_path = MixtureDiscreteProbPath(scheduler=linear_scheduler)
-
-            generalized_kl_fn = MixturePathGeneralizedKL(path=linear_path, reduction="none")
-
-            class WrappedModel(ModelWrapper):
-                def forward(self, x, t, **extras):
-                    # Note: logit's precision is important.
-                    return torch.softmax(self.model(x_t=x, time=t).float(), -1)
-
-            wrapped_probability_denoiser = WrappedModel(model=self.modules.dfm_model)
-
-            # Time discretization
-            sampling_steps = self.hparams.sampling_steps_test if stage == sb.Stage.TEST else self.hparams.sampling_steps_valid
-            discretization = (
-                torch.linspace(0, 1, sampling_steps + 1, device=self.device)[:-1]
-                .view(-1, 1)
-                .repeat(1, self.hparams.batch_size_eval)
-            )
-            # Lower variance estimator for time discretization
-            discretization = discretization + torch.rand(
-                size=(1, self.hparams.batch_size_eval), device=self.device
-            )
-            discretization = discretization % 1
-            discretization = discretization * (1 - self.time_epsilon)
-
-            for k in discretization[:, : x_1.shape[0]]:
-                x_0 = torch.randint_like(x_1, high=self.hparams.output_neurons)
-                x_t = linear_path.sample(t=k, x_0=x_0, x_1=x_1).x_t
-
-                t = self.hparams.path.scheduler.kappa_inverse(k)
-
-                logits = wrapped_probability_denoiser(x=x_t, t=t)
-
-                generalized_kl = generalized_kl_fn(logits=logits, x_1=x_1, x_t=x_t, t=k)
-                self.n_elements += generalized_kl.numel()
-
-                self.elbo += generalized_kl.sum()
-
-            current_epoch = self.hparams.epoch_counter.current
-            valid_search_interval = self.hparams.valid_search_interval
-            if current_epoch % valid_search_interval == 0 or (
-                stage == sb.Stage.TEST
-            ):
-
-                solver = MixtureDiscreteEulerSolver(
-                    model=wrapped_probability_denoiser,
-                    path=self.hparams.path,
-                    vocabulary_size=self.hparams.output_neurons
-                )
-
-
-                sample = solver.sample(
-                    x_init=x_0,
-                    step_size=1 / sampling_steps,
-                    verbose=True,
-                    dtype_categorical=torch.float64,
-                    time_grid=torch.tensor([0.0, 1.0 - self.time_epsilon]),
-                )
-
-
-                sample[:,-1] = 2 # ensure all sequences have at least one eos token
-                sample_list = [s.tolist() for s in sample]
-                sample_list_filtered = [s[:s.index(2)] for s in sample_list]
-                sample_list_filtered = [[i for i in s if i != 0] for s in sample_list_filtered]
-
-                # Decode token terms to words
-                predicted_words = [
-                    tokenizer.decode_ids(utt_seq).split(" ") for utt_seq in sample_list_filtered
-                ]
-                target_words = [wrd.split(" ") for wrd in batch.wrd]
-                self.wer_metric.append(ids, predicted_words, target_words)
-                print(predicted_words)
+            # linear_scheduler = PolynomialConvexScheduler(n=1.0)
+            # linear_path = MixtureDiscreteProbPath(scheduler=linear_scheduler)
+            #
+            # generalized_kl_fn = MixturePathGeneralizedKL(path=linear_path, reduction="none")
+            #
+            # class WrappedModel(ModelWrapper):
+            #     def forward(self, x, t, **extras):
+            #         # Note: logit's precision is important.
+            #         probs = torch.softmax(self.model(x_t=x, time=t).float(), -1) 
+            #         probs[:, :2] *= 0 # zero out first two tokens
+            #         return probs
+            #
+            # wrapped_probability_denoiser = WrappedModel(model=self.modules.dfm_model)
+            #
+            # # Time discretization
+            # sampling_steps = self.hparams.sampling_steps_test if stage == sb.Stage.TEST else self.hparams.sampling_steps_valid
+            # discretization = (
+            #     torch.linspace(0, 1, sampling_steps + 1, device=self.device)[:-1]
+            #     .view(-1, 1)
+            #     .repeat(1, self.hparams.batch_size_eval)
+            # )
+            # # Lower variance estimator for time discretization
+            # discretization = discretization + torch.rand(
+            #     size=(1, self.hparams.batch_size_eval), device=self.device
+            # )
+            # discretization = discretization % 1
+            # discretization = discretization * (1 - self.time_epsilon)
+            #
+            # for k in discretization[:, : x_1.shape[0]]:
+            #     x_0 = torch.randint_like(x_1, high=self.hparams.output_neurons)
+            #     # add task and bos tokens
+            #     x_0[:self.hparams.batch_size_eval, 0] = self.audio_mode_token
+            #     x_0[self.hparams.batch_size_eval:, 0] = self.text_mode_token
+            #     x_0[:self.hparams.batch_size_eval, 1] = 1
+            #     x_0[self.hparams.batch_size_eval:, 1] = 1
+            #
+            #     x_t = linear_path.sample(t=k, x_0=x_0, x_1=x_1).x_t
+            #
+            #     t = self.hparams.path.scheduler.kappa_inverse(k)
+            #
+            #     logits = wrapped_probability_denoiser(x=x_t, t=t)
+            #
+            #     generalized_kl = generalized_kl_fn(logits=logits, x_1=x_1, x_t=x_t, t=k)
+            #     self.n_elements += generalized_kl.numel()
+            #
+            #     self.elbo += generalized_kl.sum()
+            #
+            # current_epoch = self.hparams.epoch_counter.current
+            # valid_search_interval = self.hparams.valid_search_interval
+            # if current_epoch % valid_search_interval == 0 or (
+            #     stage == sb.Stage.TEST
+            # ):
+            #
+            #     solver = MixtureDiscreteEulerSolver(
+            #         model=wrapped_probability_denoiser,
+            #         path=self.hparams.path,
+            #         vocabulary_size=self.hparams.output_neurons
+            #     )
+            #
+            #
+            #     sample = solver.sample(
+            #         x_init=x_0,
+            #         step_size=1 / sampling_steps,
+            #         verbose=True,
+            #         dtype_categorical=torch.float64,
+            #         time_grid=torch.tensor([0.0, 1.0 - self.time_epsilon]),
+            #     )
+            #
+            #
+            #     sample[:,-1] = 2 # ensure all sequences have at least one eos token
+            #     sample_list = [s.tolist() for s in sample]
+            #     sample_list_filtered = [s[:s.index(2)] for s in sample_list]
+            #     sample_list_filtered = [[i for i in s if i != 0] for s in sample_list_filtered]
+            #
+            #     # Decode token terms to words
+            #     predicted_words = [
+            #         tokenizer.decode_ids(utt_seq).split(" ") for utt_seq in sample_list_filtered
+            #     ]
+            #     target_words = [wrd.split(" ") for wrd in batch.wrd]
+            #     self.wer_metric.append(ids, predicted_words, target_words)
+            #     print(predicted_words)
 
 
             # compute the accuracy of the one-step-forward prediction
             self.acc_metric.append(logits, x_1, x_1_lens)
-            self.acc_metric_pad.append(logits, x_1, x_1_lens)
+            self.acc_metric_audio.append(logits[:self.hparams.batch_size_eval], x_1[:self.hparams.batch_size_eval], x_1_lens[:self.hparams.batch_size_eval])
+            self.acc_metric_text.append(logits[self.hparams.batch_size_eval:], x_1[self.hparams.batch_size_eval:], x_1_lens[self.hparams.batch_size_eval:])
 
         return loss
 
@@ -188,6 +215,8 @@ class ASR(sb.core.Brain):
         """Gets called at the beginning of each epoch"""
         if stage != sb.Stage.TRAIN:
             self.acc_metric = self.hparams.acc_computer()
+            self.acc_metric_audio = self.hparams.acc_computer()
+            self.acc_metric_text = self.hparams.acc_computer()
             self.acc_metric_pad = self.hparams.acc_computer()
             self.wer_metric = self.hparams.error_rate_computer()
 
@@ -202,6 +231,8 @@ class ASR(sb.core.Brain):
             self.train_stats = stage_stats
         else:
             stage_stats["ACC"] = self.acc_metric.summarize()
+            stage_stats["ACC_audio"] = self.acc_metric_audio.summarize()
+            stage_stats["ACC_text"] = self.acc_metric_text.summarize()
             stage_stats["ELBO"] = torch.exp(self.elbo / self.n_elements).item()
             current_epoch = self.hparams.epoch_counter.current
             valid_search_interval = self.hparams.valid_search_interval
@@ -435,6 +466,8 @@ if __name__ == "__main__":
     )
 
     asr_brain.time_epsilon = 1e-3 if isinstance(asr_brain.hparams.loss_fn, MixturePathGeneralizedKL) else 0.0
+    asr_brain.text_mode_token = hparams["output_neurons"] - 2
+    asr_brain.audio_mode_token = hparams["output_neurons"] - 1
 
     # adding objects to trainer:
     asr_brain.tokenizer = hparams["tokenizer"]

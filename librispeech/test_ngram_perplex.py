@@ -60,10 +60,15 @@ class ASR(sb.core.Brain):
 
         self.checkpointer.recover_if_possible(min_key="loss")
 
+        text_mode_token = self.text_mode_token
+
         class WrappedModel(ModelWrapper):
             def forward(self, x, t, **extras):
                 # Note: logit's precision is important.
-                return torch.softmax(self.model(x_t=x, time=t).float(), -1)
+                x[:, 0] = text_mode_token
+                x[:, 1] = 1
+                probs = torch.softmax(self.model(x_t=x, time=t).float(), -1) 
+                return probs
 
         wrapped_probability_denoiser = WrappedModel(model=self.modules.dfm_model)
 
@@ -80,6 +85,8 @@ class ASR(sb.core.Brain):
             x_1, x_1_lens = batch.tokens
             x_1 = x_1.to(self.device)
             x_0 = torch.randint_like(x_1, high=self.hparams.output_neurons)
+            x_0[:, 0] = self.text_mode_token
+            x_0[:, 1] = 1
 
             sample = solver.sample(
                 x_init=x_0,
@@ -89,14 +96,16 @@ class ASR(sb.core.Brain):
                 time_grid=torch.tensor([0.0, 1.0 - self.time_epsilon]),
             )
 
+            special_tokens = [0,1,2, self.audio_mode_token, self.text_mode_token]
             sample[:,-1] = 2 # ensure all sequences have at least one eos token
+            sample = sample[:,2:]
             sample_list = [s.tolist() for s in sample]
             sample_list_filtered = [s[:(s.index(2) + 1)] for s in sample_list]
-            sample_list_filtered = [[i for i in s if i != 0] for s in sample_list_filtered]
+            sample_list_filtered = [[i for i in s if i in special_tokens] for s in sample_list_filtered]
 
             label_list = [s.tolist() for s in x_1]
             label_list_filtered = [s[:(s.index(2) + 1)] for s in label_list]
-            label_list_filtered = [[str(i) for i in s if i != 0] for s in label_list_filtered]
+            label_list_filtered = [[str(i) for i in s if i in special_tokens] for s in label_list_filtered]
 
             predicted_words = [
                 tokenizer.decode_ids(utt_seq).split(" ") for utt_seq in sample_list_filtered
@@ -130,9 +139,7 @@ class ASR(sb.core.Brain):
             if n_ref_tokens >= self.hparams.target_ref_tokens and n_hyp_tokens >= self.hparams.target_hyp_tokens:
                 return
 
-    def compute_perplexity(self, data):
-        hyp_model = kenlm.Model(f"{self.hparams.kenlm_dir}/hyp.arpa")
-        ref_model = kenlm.Model(f"{self.hparams.kenlm_dir}/ref.arpa")
+    def compute_perplexity(self, data, hyp_model, ref_model):
 
         num_tok = 0
         full_score_hyp = 0
@@ -329,17 +336,30 @@ if __name__ == "__main__":
             valid_dataloader_opts["collate_fn"] = collate_fn
 
     # Training generation
-    asr_brain.generate_ngram_training_data(train_data)
+    asr_brain.text_mode_token = hparams["output_neurons"] - 2
+    asr_brain.audio_mode_token = hparams["output_neurons"] - 1
+
+    if not hparams["skip_generate_ngram_training_data"]:
+        asr_brain.generate_ngram_training_data(train_data)
 
     # Training
     kenlm_save_path = hparams["kenlm_dir"]
-    with open(f"./{kenlm_save_path}/hyp.txt", 'r') as hyp_txt, open(f"./{kenlm_save_path}/hyp.arpa", 'w') as hyp_arpa: 
-        subprocess.run([hparams["kenlm_lmplz"], "-o3"], stdin=hyp_txt, stdout=hyp_arpa)
-    with open(f"./{kenlm_save_path}/ref.txt", 'r') as ref_txt, open(f"./{kenlm_save_path}/ref.arpa", 'w') as ref_arpa: 
-        subprocess.run([hparams["kenlm_lmplz"], "-o3"], stdin=ref_txt, stdout=ref_arpa)
+
+    for o in range(2,5):
+        with open(f"./{kenlm_save_path}/hyp.txt", 'r') as hyp_txt, open(f"./{kenlm_save_path}/hyp_o{o}.arpa", 'w') as hyp_arpa: 
+            subprocess.run([hparams["kenlm_lmplz"], f"-o{o}", "--discount_fallback"], stdin=hyp_txt, stdout=hyp_arpa)
+
+        with open(f"./{kenlm_save_path}/ref.txt", 'r') as ref_txt, open(f"./{kenlm_save_path}/ref_o{o}.arpa", 'w') as ref_arpa: 
+            subprocess.run([hparams["kenlm_lmplz"], f"-o{o}", "--discount_fallback"], stdin=ref_txt, stdout=ref_arpa)
 
     # Testing
-    for k in test_datasets.keys():  # keys are test_clean, test_other etc
-        print(f"testing {k}")
-        asr_brain.compute_perplexity(test_datasets[k])
+    for o in range(2,5):
+        for k in test_datasets.keys():  # keys are test_clean, test_other etc
+            try:
+                hyp_model = kenlm.Model(f"{kenlm_save_path}/hyp_o{o}.arpa")
+                ref_model = kenlm.Model(f"{kenlm_save_path}/ref_o{o}.arpa")
+                print(f"testing {k} with {o}-gram lm")
+                asr_brain.compute_perplexity(test_datasets[k], hyp_model, ref_model)
+            except:
+                print(f"model {o} failed to load")
 

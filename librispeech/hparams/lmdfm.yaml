@@ -22,6 +22,7 @@ kenlm_dir: !ref <output_folder>/kenlm
 kenlm_lmplz: /exp/exp4/acq22mc/kenlm/build/bin/lmplz
 target_ref_tokens: 500000
 target_hyp_tokens: 500000
+skip_generate_ngram_training_data: false
 train_only: false
 
 # Language model (LM) pretraining
@@ -58,12 +59,12 @@ test_csv:
 # Empirically, we found that this value should be >= 128.
 # Please, set your parameters accordingly.
 number_of_epochs: 160
-batch_size: 128
-batch_size_eval: 256
+batch_size: 32
+batch_size_eval: 64
 ctc_weight: 0.3
-grad_accumulation_factor: 1
+grad_accumulation_factor: 2
 max_grad_norm: 5.0
-loss_reduction: 'batchmean'
+loss_reduction: 'none'
 sorting: random
 num_workers: 2
 ckpt_interval_minutes: 15 # save checkpoint every N min
@@ -126,7 +127,8 @@ n_blocks: 12
 cond_dim: 128
 transformer_dropout: 0.1
 activation: !name:torch.nn.GELU
-output_neurons: 2048
+vocab_size: 2048
+output_neurons: 2050
 # specify 'hypermixing' for usage of multi-head HyperMixer instead of MultiHeadAttention
 # You can also specify RelPosMHAXL for conformer
 attention_type: hypermixing
@@ -196,7 +198,7 @@ log_softmax: !new:torch.nn.LogSoftmax
 
 loss_fn: !new:flow_matching.loss.MixturePathGeneralizedKL
     path: !ref <path>
-    reduction: mean
+    reduction: none
 
 # loss_fn: !new:torch.nn.CrossEntropyLoss
 

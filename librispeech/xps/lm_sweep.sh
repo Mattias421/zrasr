@@ -5,25 +5,23 @@ BASE_HPARAMS_FILE="hparams/lmdfm.yaml"
 
 # --- Grid Search Parameters ---
 # Define the values for learning rate (lr_adam)
-LR_ADAM_VALUES=(10 1 0.1)
+LR_ADAM_VALUES=(10)
 
 # Define the values for n_warmup_steps
-N_WARMUP_STEPS_VALUES=(100000 250000 500000)
+N_WARMUP_STEPS_VALUES=(50000 25000 10000 5000 2500)
 
 # Define the values for d_model
-D_MODEL_VALUES=(512 768 1024)
+D_MODEL_VALUES=(768)
 
 # Define the values for transformer_dropout
-TRANSFORMER_DROPOUT_VALUES=(0.05 0.1 0.2)
+TRANSFORMER_DROPOUT_VALUES=(0.25 0.1 0.2 0.3)
 # --- End Grid Search Parameters ---
 
 # Output directory for experiment results (for organization, though not directly used by --trial_id)
 OUTPUT_ROOT="grid_search_direct_args"
-mkdir -p "$OUTPUT_ROOT" # Still good practice to have a top-level dir if you store other things
 
 # GRID PARAMS
 NUM_EPOCH=10
-WANDB_TAGS=lm_sweep
 
 echo "Starting grid search..."
 
@@ -48,7 +46,7 @@ for LR in "${LR_ADAM_VALUES[@]}"; do
 
                 # The actual command to run your training script, now passing HPs directly
                 # Make sure 'uv' and 'train_lmdfm.py' are accessible in your PATH or specify full paths
-                uv run python train_lmdfm.py "$BASE_HPARAMS_FILE" \
+                CUDA_VISIBLE_DEVICES=2 WANDB_TAGS=lm_sweep uv run python train_lmdfm.py "$BASE_HPARAMS_FILE" \
                    --trial_id="$TRIAL_ID" \
                    --lr_adam="$LR" \
                    --n_warmup_steps="$NWS" \
