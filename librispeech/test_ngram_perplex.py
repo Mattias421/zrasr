@@ -101,11 +101,11 @@ class ASR(sb.core.Brain):
             sample = sample[:,2:]
             sample_list = [s.tolist() for s in sample]
             sample_list_filtered = [s[:(s.index(2) + 1)] for s in sample_list]
-            sample_list_filtered = [[i for i in s if i in special_tokens] for s in sample_list_filtered]
+            sample_list_filtered = [[i for i in s if i not in special_tokens] for s in sample_list_filtered]
 
             label_list = [s.tolist() for s in x_1]
             label_list_filtered = [s[:(s.index(2) + 1)] for s in label_list]
-            label_list_filtered = [[str(i) for i in s if i in special_tokens] for s in label_list_filtered]
+            label_list_filtered = [[str(i) for i in s if i not in special_tokens] for s in label_list_filtered]
 
             predicted_words = [
                 tokenizer.decode_ids(utt_seq).split(" ") for utt_seq in sample_list_filtered
